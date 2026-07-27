@@ -119,7 +119,8 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             "/threshold &lt;0-100&gt; — alert sensitivity\n"
             "/mute &lt;min&gt; · /unmute — silence alerts\n"
             "/pause · /resume — halt all alert delivery\n"
-            "/test — send a sample alert (verify wiring)\n\n"
+            "/test — send a sample alert (verify wiring)\n"
+            "/whoami — chat id &amp; alert-routing diagnostics\n\n"
             "<b>🩺 Diagnostics</b>\n"
             "/status — module health\n"
             "/venues — feed connections\n"
@@ -598,6 +599,48 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
         bot.muted_until = 0.0
         return "🔔 Unmuted."
 
+    # -------------------------------------------------------- /whoami
+    async def whoami_cmd(args: list[str], chat_id: int) -> str:
+        """Report this chat's id and whether alerts will actually reach it.
+
+        Exists because the single most common misconfiguration is a wrong
+        TELEGRAM_CHAT_ID: alerts fail with "chat not found" and the cause is
+        invisible from inside Telegram.
+        """
+        configured = str(app.settings.alerts.telegram_chat_id or "")
+        here = str(chat_id)
+        subscribed = here in bot.subscribers
+        lines = [
+            "<b>🪪 Chat Diagnostics</b>",
+            "",
+            f"This chat id:   <code>{here}</code>",
+            f"Configured id:  <code>{configured or '(unset)'}</code>",
+            f"Subscribed:     {'✅ yes' if subscribed else '❌ no — send /watch'}",
+        ]
+        if bot.allowed_chats:
+            ok = here in bot.allowed_chats
+            lines.append(f"Authorised:     {'✅ yes' if ok else '❌ no'}")
+        else:
+            lines.append("Authorised:     ✅ open (no allow-list configured)")
+
+        if configured and configured != here:
+            lines += [
+                "",
+                "⚠️ <b>Alerts are being sent to a different chat.</b>",
+                f"To receive them here, set <code>TELEGRAM_CHAT_ID={here}</code> "
+                "in <code>.env</code> and restart.",
+            ]
+        elif not configured:
+            lines += [
+                "",
+                f"⚠️ No chat configured. Set <code>TELEGRAM_CHAT_ID={here}</code> "
+                "in <code>.env</code> and restart, or just send /watch to "
+                "subscribe this chat for the current session.",
+            ]
+        else:
+            lines += ["", "✅ Alert delivery is correctly targeted at this chat."]
+        return "\n".join(lines)
+
     # ---------------------------------------------------------- /test
     async def test_cmd(args: list[str], chat_id: int) -> str:
         """Fire a synthetic alert so users can verify delivery end to end."""
@@ -644,4 +687,5 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
     bot.register("pause", pause_cmd, "Pause alert delivery")
     bot.register("resume", resume_cmd, "Resume alert delivery")
     bot.register("unmute", unmute_cmd, "Cancel an active mute")
+    bot.register("whoami", whoami_cmd, "Show this chat id and alert routing")
     bot.register("test", test_cmd, "Send a test alert")

@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 162 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 173 tests passing.
 
 ---
 
@@ -199,7 +199,7 @@ most for real-world usability.
 
 ## Telegram bot
 
-22 commands across four groups. The bot is not just an alert pipe — you can
+23 commands across four groups. The bot is not just an alert pipe — you can
 interrogate every module's live state and control sensitivity without a restart.
 
 **📊 Monitoring**
@@ -234,6 +234,7 @@ interrogate every module's live state and control sensitivity without a restart.
 
 | Command | Action |
 |---|---|
+| `/whoami` | This chat's id and alert-routing diagnostics |
 | `/status` | Module health, bus throughput, classifier state, latency |
 | `/venues` | Feed connections, message counts, degraded streams |
 | `/config` | Every active threshold and coverage setting |
@@ -319,7 +320,7 @@ src/cadb/
 ├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 162 tests
+tests/                 173 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -346,7 +347,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 162 tests, ~2 min
+pytest tests/ -v                                  # 173 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 

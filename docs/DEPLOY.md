@@ -244,6 +244,12 @@ bots can only message users who have started a conversation with them first:
    Group ids are negative and supergroups start `-100`.
 4. Update `.env`, then `docker compose up -d` and send `/test` to confirm.
 
+**Bot ignores your commands (no reply at all)** — almost always a chat-id
+mismatch. Send `/whoami`: it reports this chat's id, the configured id, and
+whether alerts are routed here. If they differ, put the reported id in
+`TELEGRAM_CHAT_ID` and restart. A wrong id no longer locks you out — the bot
+now replies telling you the correct value.
+
 **MEXC `requires protobuf to decode messages`** — MEXC streams binary protobuf
 frames. Fixed by the `[exchange]` extra, which now pins `protobuf>=5.29,<6`.
 Rebuild the image, or drop `mexc` from `exchange.exchanges`.

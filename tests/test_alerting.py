@@ -413,3 +413,169 @@ class TestNoDuplicateBroadcast:
         await app._on_signal(_signal(82.0, "SOL", Severity.HIGH))
         await app._on_signal(_signal(95.0, "SOL", Severity.CRITICAL))
         assert len(sent) == 2, "severity escalation must break the cooldown"
+
+
+class TestCommandDispatch:
+    """Regression: commands were silently dropped before reaching a handler.
+
+    The earlier suite invoked handlers directly, so it never exercised
+    `_handle_update` — where a stale TELEGRAM_CHAT_ID was discarding every
+    command with only a server-side log line.
+    """
+
+    def _bot(self, **kwargs):
+        from cadb.bot.telegram_bot import TelegramBot
+
+        bot = TelegramBot(token="x", **kwargs)
+        sent: list[tuple[str, str]] = []
+
+        async def fake_send(chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+            sent.append((chat_id, text))
+            return True
+
+        bot.send = fake_send  # type: ignore[assignment]
+
+        async def ping(args, chat_id):
+            return "pong"
+
+        bot.register("ping", ping, "test")
+        return bot, sent
+
+    @staticmethod
+    def _update(text: str, chat_id: int):
+        return {"message": {"text": text, "chat": {"id": chat_id}}}
+
+    async def test_default_chat_id_does_not_create_a_lockout(self):
+        """A wrong alert destination must not silently disable the bot."""
+        bot, sent = self._bot(default_chat_id="-1001234567890")
+        await bot._handle_update(self._update("/ping", 987654321))
+        assert sent and sent[0][1] == "pong"
+
+    async def test_explicit_allowlist_still_enforced(self):
+        bot, sent = self._bot(allowed_chats=["111"])
+        await bot._handle_update(self._update("/ping", 999))
+        assert sent, "rejection must be reported, not silent"
+        assert "not authorised" in sent[0][1].lower()
+        assert "999" in sent[0][1], "must tell the user their real chat id"
+
+    async def test_allowed_chat_passes(self):
+        bot, sent = self._bot(allowed_chats=["111"])
+        await bot._handle_update(self._update("/ping", 111))
+        assert sent[0][1] == "pong"
+
+    async def test_rejection_replies_are_bounded(self):
+        """Never let an unauthorised chat amplify traffic indefinitely."""
+        bot, sent = self._bot(allowed_chats=["111"])
+        for _ in range(20):
+            await bot._handle_update(self._update("/ping", 999))
+        assert len(sent) <= 3
+
+    async def test_unknown_command_gets_a_reply(self):
+        bot, sent = self._bot()
+        await bot._handle_update(self._update("/nosuchcmd", 1))
+        assert sent and "unknown" in sent[0][1].lower()
+
+    async def test_bot_username_suffix_is_stripped(self):
+        """Group chats send /cmd@BotName — must still route."""
+        bot, sent = self._bot()
+        await bot._handle_update(self._update("/ping@my_bot", 1))
+        assert sent[0][1] == "pong"
+
+    async def test_handler_exception_reports_to_user(self):
+        from cadb.bot.telegram_bot import TelegramBot
+
+        bot = TelegramBot(token="x")
+        sent: list[str] = []
+
+        async def fake_send(chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+            sent.append(text)
+            return True
+
+        bot.send = fake_send  # type: ignore[assignment]
+
+        async def boom(args, chat_id):
+            raise ValueError("kaboom")
+
+        bot.register("boom", boom, "test")
+        await bot._handle_update(self._update("/boom", 1))
+        assert sent and "failed" in sent[0].lower()
+
+    async def test_non_command_text_ignored(self):
+        bot, sent = self._bot()
+        await bot._handle_update(self._update("just chatting", 1))
+        assert sent == []
+
+
+class TestAllCommandsThroughDispatch:
+    """Every registered command must survive the real dispatch path."""
+
+    @pytest_asyncio.fixture
+    async def live(self):
+        from cadb.app import Application
+        from cadb.bot.commands import register_commands
+        from cadb.bot.telegram_bot import TelegramBot
+        from cadb.core.config import Settings
+
+        s = Settings()
+        s.exchange.simulate = s.onchain.simulate = s.social.simulate = True
+        s.exchange.exchanges = ["binance"]
+        s.exchange.symbols = ["BTC/USDT"]
+        s.social.tracked_tickers = ["BTC"]
+        s.social.use_finbert = False
+        s.ml.model_path = ""
+        s.alerts.dry_run = True
+        s.telemetry.log_level = "ERROR"
+        s.telemetry.state_file = ""
+        s.telemetry.health_interval_s = 9999
+
+        app = Application(s)
+        await app.setup()
+        bot = TelegramBot(token="")
+        app.bot = bot
+        register_commands(bot, app)
+
+        sent: list[str] = []
+
+        async def fake_send(chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+            sent.append(text)
+            return True
+
+        bot.send = fake_send  # type: ignore[assignment]
+        yield app, bot, sent
+
+    async def test_every_command_replies(self, live):
+        app, bot, sent = live
+        sample_args = {
+            "check": "BTC", "explain": "BTC", "book": "BTC/USDT",
+            "social": "BTC", "whales": "BTC", "history": "BTC",
+            "threshold": "80", "mute": "1",
+        }
+        failures = []
+        for name in sorted(bot.commands):
+            sent.clear()
+            arg = sample_args.get(name, "")
+            text = f"/{name} {arg}".strip()
+            try:
+                await bot._handle_update(
+                    {"message": {"text": text, "chat": {"id": 1}}}
+                )
+            except Exception as exc:
+                failures.append(f"{name}: {type(exc).__name__}: {exc}")
+                continue
+            if not sent or not sent[0].strip():
+                failures.append(f"{name}: no reply")
+            elif len(sent[0]) > 4096:
+                failures.append(f"{name}: {len(sent[0])} chars exceeds Telegram cap")
+        assert not failures, "commands failed via dispatch: " + "; ".join(failures)
+
+    async def test_every_command_has_a_menu_description(self, live):
+        _, bot, _ = live
+        missing = [c for c in bot.commands if c not in bot.descriptions]
+        assert not missing, f"no /-menu description: {missing}"
+
+    async def test_whoami_flags_chat_id_mismatch(self, live):
+        app, bot, sent = live
+        app.settings.alerts.telegram_chat_id = "-1009999"
+        await bot._handle_update({"message": {"text": "/whoami", "chat": {"id": 42}}})
+        assert "42" in sent[0]
+        assert "different chat" in sent[0].lower()

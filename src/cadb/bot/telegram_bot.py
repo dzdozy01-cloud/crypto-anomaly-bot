@@ -53,8 +53,12 @@ class TelegramBot:
     ) -> None:
         self.token = token
         self.default_chat_id = str(default_chat_id or "")
+        # `allowed_chats` is an *explicit* allow-list. The alert destination
+        # (default_chat_id) is NOT automatically the only authorised commander:
+        # deriving the allow-list from it meant a stale or wrong chat id locked
+        # the owner out of their own bot with no visible error.
         self.allowed_chats = {str(c) for c in (allowed_chats or []) if c}
-        if self.default_chat_id:
+        if self.allowed_chats and self.default_chat_id:
             self.allowed_chats.add(self.default_chat_id)
         self.poll_timeout = poll_timeout
 
@@ -68,6 +72,7 @@ class TelegramBot:
         self.descriptions: dict[str, str] = {}
         self.messages_sent = 0
         self.commands_handled = 0
+        self._rejections = 0
         self._register_builtin()
 
     # ---- plumbing --------------------------------------------------------
@@ -196,13 +201,35 @@ class TelegramBot:
         chat_id = message.get("chat", {}).get("id")
         if not text.startswith("/") or chat_id is None:
             return
-        if self.allowed_chats and str(chat_id) not in self.allowed_chats:
-            log.warning("ignoring command from unauthorised chat %s", chat_id)
-            return
 
+        # Parse before the auth check so rejection logs can name the command.
         parts = text.split()
         cmd = parts[0][1:].split("@")[0].lower()
         args = parts[1:]
+
+        if self.allowed_chats and str(chat_id) not in self.allowed_chats:
+            # Fail *loudly and visibly*. Silently dropping commands is
+            # indistinguishable from a crashed bot: in production a stale
+            # TELEGRAM_CHAT_ID meant every command from the owner's real chat
+            # was discarded with only a server-side log line, so the bot looked
+            # broken. Tell the user what is wrong and how to fix it.
+            log.warning(
+                "command /%s rejected: chat %s not in allowed_chats %s",
+                cmd, chat_id, sorted(self.allowed_chats),
+            )
+            self._rejections += 1
+            if self._rejections <= 3:  # bounded, so a spammer cannot amplify
+                await self.send(
+                    str(chat_id),
+                    "🔒 <b>This chat is not authorised.</b>\n\n"
+                    f"Your chat id is <code>{chat_id}</code>, but the bot is "
+                    "configured for a different one.\n\n"
+                    "Fix: set <code>TELEGRAM_CHAT_ID="
+                    f"{chat_id}</code> in <code>.env</code>, then "
+                    "<code>docker compose up -d</code>.",
+                )
+            return
+
         handler = self.commands.get(cmd)
         if handler is None:
             await self.send(str(chat_id), f"❓ Unknown command <code>/{cmd}</code>. Try /help")
