@@ -1,0 +1,94 @@
+# Production stack for the Oracle Cloud ARM instance.
+#
+# Pulls a prebuilt multi-arch image from GHCR — the Always Free shape is
+# 2 OCPU / 12 GB and should never spend that on `docker build`.
+#
+#   cd ~/cadb && docker compose pull && docker compose up -d
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: cadb-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --save 300 10
+      --loglevel warning
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  cadb:
+    image: ghcr.io/OWNER/REPO:latest # rewritten by bootstrap.sh
+    container_name: cadb
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      CADB_REDIS_URL: redis://redis:6379/0
+      CADB_LOG_LEVEL: ${CADB_LOG_LEVEL:-INFO}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - model-data:/app/models # trained model survives redeploys
+      - state-data:/app/state
+    ports:
+      - "127.0.0.1:9090:9090" # metrics — localhost only, never public
+    stop_grace_period: 30s
+    # Leave headroom on a 12 GB box: FinBERT (if enabled) is the only
+    # memory-hungry component and it stays well under this.
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+        reservations:
+          memory: 512M
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    healthcheck:
+      test: ["CMD", "cadb", "validate", "-c", "config.yaml"]
+      interval: 120s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+
+  # Fallback for anyone who prefers polling over push-based deploys.
+  # Disabled by default — the GitHub Actions workflow is the primary path.
+  # Enable with:  docker compose --profile watchtower up -d
+  watchtower:
+    image: containrrr/watchtower
+    container_name: cadb-watchtower
+    restart: unless-stopped
+    profiles: [watchtower]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.docker/config.json:/config.json:ro
+    command: --interval 300 --cleanup --include-restarting cadb
+    environment:
+      WATCHTOWER_NOTIFICATION_REPORT: "true"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "2" }
+
+volumes:
+  redis-data:
+  model-data:
+  state-data:

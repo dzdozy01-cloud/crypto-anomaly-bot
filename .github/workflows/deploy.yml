@@ -1,0 +1,184 @@
+name: Deploy
+
+# Auto-deploy to the Oracle server on every push to main.
+#
+# Build happens on GitHub's runners, not on the server: the Always Free ARM
+# shape is 2 OCPU / 12 GB and should be running the bot, not compiling images.
+# The server only pulls a finished multi-arch image and restarts the stack,
+# which takes seconds and needs almost no CPU.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".gitignore"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Deploy even if tests fail (emergency rollback only)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false # never interrupt a half-finished deploy
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------- gate
+  test:
+    name: Test gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src/ tests/
+      - name: Tests
+        run: pytest tests/ -q --tb=short
+      - name: Detection-quality gate
+        run: pytest tests/test_ml.py::TestDetectionQuality -q
+
+  # --------------------------------------------------------------- build
+  build:
+    name: Build multi-arch image
+    needs: test
+    if: always() && (needs.test.result == 'success' || inputs.force)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU lets an x86 runner emit an arm64 image for Ampere A1.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=,format=short
+
+      - id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          # arm64 for Oracle Ampere; amd64 so the same tag runs locally.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # -------------------------------------------------------------- deploy
+  deploy:
+    name: Deploy to Oracle
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          port: ${{ secrets.ORACLE_PORT || 22 }}
+          command_timeout: 15m
+          script: |
+            set -euo pipefail
+            cd ~/cadb
+
+            echo "::group::Pull image"
+            echo "${{ secrets.GITHUB_TOKEN }}" \
+              | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose pull cadb
+            echo "::endgroup::"
+
+            # Keep the currently-running image so we can roll back.
+            PREVIOUS=$(docker inspect --format='{{.Image}}' cadb 2>/dev/null || echo "")
+
+            echo "::group::Restart"
+            docker compose up -d --remove-orphans
+            echo "::endgroup::"
+
+            # A container that starts and immediately dies is the classic bad
+            # deploy. Give it time to boot, then verify it is genuinely healthy
+            # rather than merely "created".
+            echo "Waiting for health..."
+            for i in $(seq 1 30); do
+              sleep 5
+              STATE=$(docker inspect --format='{{.State.Status}}' cadb 2>/dev/null || echo missing)
+              if [ "$STATE" != "running" ]; then
+                echo "❌ container state=$STATE after $((i*5))s"
+                docker compose logs --tail=60 cadb
+                if [ -n "$PREVIOUS" ]; then
+                  echo "↩️  rolling back to $PREVIOUS"
+                  docker tag "$PREVIOUS" ghcr.io/${{ github.repository }}:latest
+                  docker compose up -d
+                fi
+                exit 1
+              fi
+              if docker compose logs --tail=200 cadb 2>&1 | grep -q "system online"; then
+                echo "✅ healthy after $((i*5))s"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "⚠️  no 'system online' within 150s — still running, check logs"
+                docker compose logs --tail=40 cadb
+              fi
+            done
+
+            docker image prune -f --filter "until=168h" >/dev/null 2>&1 || true
+            echo "🚀 deployed ${{ github.sha }}"
+
+      - name: Notify Telegram
+        if: always()
+        continue-on-error: true
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Silently skip when notification secrets are not configured.
+          if [ -z "${TG_TOKEN}" ] || [ -z "${TG_CHAT}" ]; then
+            echo "no telegram secrets configured — skipping notification"
+            exit 0
+          fi
+          if [ "${{ job.status }}" = "success" ]; then
+            ICON="✅"; WORD="succeeded"
+          else
+            ICON="❌"; WORD="FAILED"
+          fi
+          curl -sS -X POST \
+            "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            -d chat_id="${TG_CHAT}" \
+            -d parse_mode=HTML \
+            -d text="${ICON} <b>CADB deploy ${WORD}</b>
+          <code>${{ github.sha }}</code>
+          ${{ github.event.head_commit.message }}
+          <a href=\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\">View run</a>" \
+            >/dev/null || true

@@ -69,6 +69,19 @@ docker compose up -d            # includes Redis
 docker compose logs -f cadb
 ```
 
+### Deploy to a server with auto-update
+
+Push to `main` → CI tests it, builds an ARM64 image, your server pulls and
+restarts, with a health gate and automatic rollback. One command to provision:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dzdozy01-cloud/crypto-anomaly-bot/main/deploy/bootstrap.sh \
+  | bash -s -- dzdozy01-cloud/crypto-anomaly-bot
+```
+
+Full walkthrough incl. Oracle Cloud free-tier specifics and exchange
+geo-blocking: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+
 ---
 
 ## What each module detects
