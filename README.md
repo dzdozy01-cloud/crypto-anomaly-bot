@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 178 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 179 tests passing.
 
 ---
 
@@ -320,7 +320,7 @@ src/cadb/
 ├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 178 tests
+tests/                 179 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -347,7 +347,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 178 tests, ~2 min
+pytest tests/ -v                                  # 179 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 
@@ -373,6 +373,9 @@ places orders. **Etherscan is not used** either; the on-chain tracker speaks raw
 JSON-RPC. **Only two variables are required** — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 Everything else has a working default or degrades gracefully; the system starts
 with a completely empty environment. Full reference: **[docs/SETUP.md](docs/SETUP.md)**.
+
+Free API keys (Alchemy, X, Telegram) in priority order:
+**[docs/FREE_KEYS.md](docs/FREE_KEYS.md)**.
 
 Key knobs: `ml.alert_threshold` (default 80), `ml.ml_blend` (0 = pure rules,
 1 = pure forest), `ml.weights`, `exchange.volume_z_threshold` (3.0),

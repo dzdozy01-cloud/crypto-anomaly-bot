@@ -37,6 +37,9 @@ negative one (`-1001234567890`). For a channel, add the bot as an **admin** firs
 
 ---
 
+> **Need keys?** [docs/FREE_KEYS.md](FREE_KEYS.md) walks through obtaining every
+> credential on a free tier, in priority order, with no credit card.
+
 ## Tier 2 — Strongly recommended
 
 ### Exchange API keys: not needed, ever

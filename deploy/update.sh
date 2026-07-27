@@ -25,15 +25,31 @@ if [[ -d .git ]]; then
 fi
 
 if (( REFRESH_CONFIG )) && [[ -f config.yaml ]]; then
-  STAMP="config.yaml.bak.$(date +%Y%m%d-%H%M%S)"
-  cp config.yaml "$STAMP"
-  c_ok "backed up existing config -> ${STAMP}"
-  if [[ -f "$(dirname "$0")/../config.yaml" ]] && [[ "$(dirname "$0")/../config.yaml" != "./config.yaml" ]]; then
-    cp "$(dirname "$0")/../config.yaml" config.yaml
+  # Two supported layouts, and they need opposite handling:
+  #   * git clone   — config.yaml is tracked, so `git pull` already updated it.
+  #                   Copying the repo file over itself is a no-op at best and
+  #                   `cp: same file` at worst.
+  #   * ~/cadb      — laid out by bootstrap.sh via curl; nothing updates the
+  #                   file automatically, so fetch it from GitHub.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+     && git ls-files --error-unmatch config.yaml >/dev/null 2>&1; then
+    if ! git diff --quiet -- config.yaml; then
+      STAMP="config.yaml.bak.$(date +%Y%m%d-%H%M%S)"
+      cp config.yaml "$STAMP"
+      c_warn "local edits to config.yaml backed up -> ${STAMP}"
+      git checkout -- config.yaml
+      c_ok "config.yaml reset to the repo version (re-apply edits from ${STAMP})"
+    else
+      c_ok "config.yaml is tracked by git and already current (updated by git pull)"
+    fi
   else
-    curl -fsSL "https://raw.githubusercontent.com/dzdozy01-cloud/crypto-anomaly-bot/main/config.yaml" -o config.yaml
+    STAMP="config.yaml.bak.$(date +%Y%m%d-%H%M%S)"
+    cp config.yaml "$STAMP"
+    c_ok "backed up existing config -> ${STAMP}"
+    curl -fsSL "https://raw.githubusercontent.com/dzdozy01-cloud/crypto-anomaly-bot/main/config.yaml" \
+      -o config.yaml
+    c_ok "config.yaml refreshed from GitHub (re-apply edits from ${STAMP})"
   fi
-  c_ok "config.yaml refreshed — re-apply any custom edits from ${STAMP}"
 fi
 
 # Warn about a stale config even when not refreshing.

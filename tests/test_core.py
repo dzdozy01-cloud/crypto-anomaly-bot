@@ -388,3 +388,28 @@ class TestConfig:
         s.social.tracked_tickers = ["SOL", "btc"]
         assets = s.tracked_assets()
         assert {"BTC", "ETH", "SOL"}.issubset(set(assets))
+
+
+class TestDeployScripts:
+    """update.sh must handle both supported deployment layouts."""
+
+    def test_update_script_is_valid_bash(self):
+        import subprocess
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parent.parent / "deploy" / "update.sh"
+        assert script.exists()
+        r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert r.returncode == 0, f"syntax error: {r.stderr}"
+
+    def test_update_script_handles_git_clone_layout(self):
+        """Regression: `cp deploy/../config.yaml config.yaml` = same-file error.
+
+        In a git clone the repo root *is* the deployment directory, so copying
+        the repo's config over itself failed and aborted the update.
+        """
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent / "deploy" / "update.sh").read_text()
+        assert "is-inside-work-tree" in text, "must detect a git checkout"
+        assert "git checkout -- config.yaml" in text, "git layout should reset, not cp"
