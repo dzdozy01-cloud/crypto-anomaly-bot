@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -57,6 +58,8 @@ class MLScorer(Module):
         self.last_scores: dict[str, float] = {}
         self._urgent: set[str] = set()
         self._lock = asyncio.Lock()
+        self._last_alert_log: dict[str, float] = {}
+        self._alert_log_interval_s = 60.0
 
     def add_handler(self, handler: SignalHandler) -> None:
         """Register a downstream consumer of high-scoring signals."""
@@ -164,11 +167,25 @@ class MLScorer(Module):
         if signal.score >= self.config.alert_threshold:
             self.alerts_fired += 1
             METRICS.incr("ml.alerts")
-            self.log.warning(
-                "🚨 MANIPULATION %s score=%.1f severity=%s | %s",
-                signal.asset_pair, signal.score, signal.severity.value,
-                "; ".join(signal.reasons[:2]),
-            )
+            # Log at WARNING only when this is a *new* episode for the asset.
+            # Scoring runs every 250ms, so a single sustained event logged ~60
+            # near-identical WARNING lines in 30s, which reads as an alert storm
+            # even though the router correctly dispatched once. Subsequent
+            # scores during the same episode go to DEBUG.
+            last = self._last_alert_log.get(signal.asset_pair, 0.0)
+            now = time.monotonic()
+            if now - last >= self._alert_log_interval_s:
+                self._last_alert_log[signal.asset_pair] = now
+                self.log.warning(
+                    "🚨 MANIPULATION %s score=%.1f severity=%s | %s",
+                    signal.asset_pair, signal.score, signal.severity.value,
+                    "; ".join(signal.reasons[:2]),
+                )
+            else:
+                self.log.debug(
+                    "manipulation %s score=%.1f (ongoing)",
+                    signal.asset_pair, signal.score,
+                )
             for handler in self.handlers:
                 try:
                     await handler(signal)

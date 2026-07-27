@@ -192,6 +192,9 @@ class RobustZScore:
 
     window: int = 300
     warmup: int = 30
+    # True for count/volume series where zeros are ordinary; False for prices,
+    # where a flat series that suddenly moves is genuinely significant.
+    zero_is_normal: bool = False
     _buf: deque[float] = field(default_factory=deque, repr=False)
 
     _MAD_TO_SIGMA = 1.4826
@@ -219,11 +222,20 @@ class RobustZScore:
             scale = (q3 - q1) / 1.349
 
         if scale <= 1e-12:
-            # Still degenerate — a perfectly flat series. Returning 0 here would
-            # be actively harmful: on a pegged/dormant market *any* deviation is
-            # maximally significant, and reporting "normal" would mask exactly
-            # the kind of sudden break we exist to catch. Fall back to a
-            # magnitude-relative scale so real moves still surface.
+            # Still degenerate. What to do depends entirely on what the series
+            # *means*, which only the caller knows:
+            #
+            #  * A pegged/dormant PRICE that suddenly moves is maximally
+            #    significant — returning 0 would mask a real break.
+            #  * A sparse VOLUME series is mostly legitimate zeros (quiet 5s
+            #    buckets). Treating the first trade as a 50-sigma event produced
+            #    a continuous stream of false "manipulation" alerts in
+            #    production, because every quiet symbol looked catastrophic.
+            #
+            # `zero_is_normal` lets the caller state which regime applies rather
+            # than guessing from the data.
+            if self.zero_is_normal:
+                return None  # not enough dispersion to say anything useful
             if abs(value - med) <= 1e-12:
                 return 0.0
             scale = max(abs(med) * 1e-4, 1e-9)
@@ -258,6 +270,7 @@ class DynamicZScore:
     base_threshold: float = 3.0
     robust_weight: float = 0.6
     adaptive: bool = True
+    zero_is_normal: bool = False
 
     _ewma: EWMAZScore = field(init=False, repr=False)
     _robust: RobustZScore = field(init=False, repr=False)
@@ -266,7 +279,9 @@ class DynamicZScore:
 
     def __post_init__(self) -> None:
         self._ewma = EWMAZScore(half_life_s=self.half_life_s, warmup=self.warmup)
-        self._robust = RobustZScore(window=self.window, warmup=self.warmup)
+        self._robust = RobustZScore(
+            window=self.window, warmup=self.warmup, zero_is_normal=self.zero_is_normal
+        )
 
     def update(self, value: float, timestamp_ms: int | None = None) -> float | None:
         ez = self._ewma.update(value, timestamp_ms)

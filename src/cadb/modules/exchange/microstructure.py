@@ -241,6 +241,10 @@ class VolumeProfile:
             window=max(60, self.window_s // max(self.bucket_s, 1)),
             warmup=max(10, (self.window_s // max(self.bucket_s, 1)) // 4),
             base_threshold=self.threshold,
+            # Empty buckets are normal for any symbol that is not trading every
+            # second — without this, the first trade after a quiet spell scored
+            # 50 sigma and every calm market looked like manipulation.
+            zero_is_normal=True,
         )
 
     def add_trade(self, timestamp_ms: int, size: float, price: float) -> float | None:
@@ -337,7 +341,10 @@ class CVDTracker:
 
     def __post_init__(self) -> None:
         self.delta_window = RollingWindow(window_ms=self.window_s * 1000)
-        self.zscore = DynamicZScore(half_life_s=self.window_s / 3, warmup=20, base_threshold=2.5)
+        self.zscore = DynamicZScore(
+            half_life_s=self.window_s / 3, warmup=20, base_threshold=2.5,
+            zero_is_normal=True,
+        )
 
     def add_trade(self, timestamp_ms: int, size: float, price: float, side: Side) -> float:
         """Apply a trade; ``side`` is the aggressor side. Returns the new CVD."""

@@ -450,3 +450,61 @@ class TestBSCEndpointDefaults:
         urls += s.onchain.solana_rpc.split(",")
         for u in filter(None, (x.strip() for x in urls)):
             assert u.startswith("https://"), f"insecure or malformed endpoint: {u}"
+
+
+class TestSparseSeriesZScore:
+    """Regression: sparse volume buckets produced 50-sigma false positives.
+
+    Production symptom: `volume spike bybit BTC/USDT z=990.38` and a continuous
+    stream of score=82.0 "manipulation" alerts on ordinary market activity.
+    Cause: for a mostly-zero series MAD collapses to 0, and the degenerate-scale
+    fallback treated any non-zero value as maximally significant.
+    """
+
+    def test_sparse_counts_do_not_explode(self):
+        from cadb.core.stats import RobustZScore
+
+        r = RobustZScore(window=300, warmup=30, zero_is_normal=True)
+        for _ in range(40):
+            r.update(0.0)
+        assert r.score(5.0) is None, "sparse count series must not fabricate sigma"
+
+    def test_flat_price_break_still_detected(self):
+        """The opposite case must keep working — a pegged price that moves."""
+        from cadb.core.stats import RobustZScore
+
+        r = RobustZScore(window=300, warmup=30, zero_is_normal=False)
+        for _ in range(40):
+            r.update(100.0)
+        z = r.score(105.0)
+        assert z is not None and abs(z) > 10
+
+    def test_volume_profile_bounded_on_sparse_data(self):
+        from cadb.core.schema import now_ms
+        from cadb.modules.exchange.microstructure import VolumeProfile
+
+        vp = VolumeProfile(symbol="X/Y", venue="v", window_s=300, bucket_s=5)
+        t = (now_ms() // 5000) * 5000
+        seen = []
+        for i in range(60):
+            z = vp.add_trade(t + i * 5000, 0.0001 if i % 7 else 1.0, 100.0)
+            if z is not None:
+                seen.append(z)
+        assert seen, "expected some z-scores"
+        assert max(abs(z) for z in seen) < 20, f"absurd z on sparse data: {max(seen)}"
+
+    def test_genuine_spike_still_detected(self):
+        """Guard against over-correcting into missed detections."""
+        import random
+
+        from cadb.core.schema import now_ms
+        from cadb.modules.exchange.microstructure import VolumeProfile
+
+        vp = VolumeProfile(symbol="X/Y", venue="v", window_s=300, bucket_s=5)
+        t = (now_ms() // 5000) * 5000
+        rng = random.Random(0)
+        for i in range(100):
+            vp.add_trade(t + i * 5000, 1.0 + rng.gauss(0, 0.05), 100.0)
+        vp.add_trade(t + 100 * 5000, 50.0, 100.0)
+        z = vp.add_trade(t + 101 * 5000, 1.0, 100.0)
+        assert z is not None and z > 3.0, "real spikes must still fire"

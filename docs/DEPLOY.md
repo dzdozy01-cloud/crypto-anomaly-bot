@@ -279,6 +279,11 @@ every scoring cycle, bypassing the router's cooldown. Rebuild to pick up the fix
 to a *simulated* social feed that injects fake campaigns. It now refuses and
 reports the module unhealthy instead. Rebuild.
 
+**Constant score=82 alerts on BTC/ETH with huge z-scores (z=990 etc.)** — fixed.
+Sparse volume buckets collapsed the MAD estimator, so the first trade after a
+quiet 5s window scored 50 sigma. Volume, CVD and mention series are now declared
+as count-based, where zeros are ordinary. Rebuild to pick this up.
+
 **Exchange 451/403** — geo-block, covered above. Drop the venue or change region.
 
 **Out of memory on the micro shape** — set `social.use_finbert: false` in
