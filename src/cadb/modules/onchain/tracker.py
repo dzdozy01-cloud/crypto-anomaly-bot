@@ -80,8 +80,26 @@ class _ChainCursor:
 
     last_block: int = 0
     lag_blocks: int = 2           # stay behind the tip to avoid reorgs
-    max_span: int = 200           # never request more than this many blocks at once
+    max_span: int = 50            # blocks per eth_getLogs call (adapts at runtime)
     errors: int = 0
+
+    # Free/public RPCs cap eth_getLogs by block range or result count and reply
+    # `-32005 limit exceeded`. Rather than failing the whole scan loop, halve the
+    # span and retry; widen again after sustained success. This lets the tracker
+    # self-tune to whatever the endpoint actually allows.
+    MIN_SPAN: int = 5
+    MAX_SPAN: int = 200
+    _ok_streak: int = 0
+
+    def shrink(self) -> None:
+        self.max_span = max(self.MIN_SPAN, self.max_span // 2)
+        self._ok_streak = 0
+
+    def grow(self) -> None:
+        self._ok_streak += 1
+        if self._ok_streak >= 10 and self.max_span < self.MAX_SPAN:
+            self.max_span = min(self.MAX_SPAN, self.max_span * 2)
+            self._ok_streak = 0
 
 
 class WhaleTracker(Module):
@@ -191,12 +209,29 @@ class WhaleTracker(Module):
             from_block = cursor.last_block + 1
             to_block = min(target, from_block + cursor.max_span - 1)
 
-            logs = await client.get_logs(
-                from_block=from_block,
-                to_block=to_block,
-                address=tokens,
-                topics=[TRANSFER_TOPIC],
-            )
+            try:
+                logs = await client.get_logs(
+                    from_block=from_block,
+                    to_block=to_block,
+                    address=tokens,
+                    topics=[TRANSFER_TOPIC],
+                )
+            except Exception as exc:
+                # Range/result caps are expected on free endpoints — back off
+                # the span instead of tearing down the supervised task.
+                msg = str(exc).lower()
+                if any(k in msg for k in ("limit exceeded", "too many", "range",
+                                          "query returned more than", "-32005")):
+                    cursor.shrink()
+                    self.log.warning(
+                        "%s: RPC range limit hit, reducing span to %d blocks",
+                        chain, cursor.max_span,
+                    )
+                    await asyncio.sleep(self.config.poll_interval_s)
+                    continue
+                raise
+
+            cursor.grow()
             block_ts = await self._block_timestamp(client, to_block)
             await self._process_evm_logs(chain, logs, block_ts)
             cursor.last_block = to_block

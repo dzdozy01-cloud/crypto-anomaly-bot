@@ -23,7 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Real-time exchange feeds (ccxt.pro ships inside ccxt >= 4)
-exchange = ["ccxt>=4.2", "websockets>=12.0"]
+# protobuf: MEXC streams binary protobuf frames; ccxt raises NotSupported
+# without it and the decode error surfaces as an unhandled asyncio callback.
+exchange = ["ccxt>=4.2", "websockets>=12.0", "protobuf>=5.29,<6"]
 # EVM helpers. The RPC layer works on raw JSON-RPC; web3 is only used for
 # checksum addresses / ABI decoding when present.
 onchain = ["web3>=6.11"]
@@ -34,7 +36,7 @@ redis = ["redis>=5.0"]
 speed = ["orjson>=3.9", "uvloop>=0.19; sys_platform != 'win32'"]
 dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "ruff>=0.1", "mypy>=1.8"]
 all = [
-    "ccxt>=4.2", "websockets>=12.0", "web3>=6.11",
+    "ccxt>=4.2", "websockets>=12.0", "protobuf>=5.29,<6", "web3>=6.11",
     "transformers>=4.36", "torch>=2.1", "redis>=5.0", "orjson>=3.9",
 ]
 

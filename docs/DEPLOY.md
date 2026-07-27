@@ -231,6 +231,36 @@ including both header lines, that `ORACLE_USER` matches the image
 malformed `.env` or a `config.yaml` typo; `docker compose run --rm cadb validate -c config.yaml`
 pinpoints it.
 
+**`Bad Request: chat not found`** — the bot cannot reach `TELEGRAM_CHAT_ID`. Telegram
+bots can only message users who have started a conversation with them first:
+
+1. Open your bot in Telegram and press **Start** (or send `/start`).
+2. Re-read the real id — it changes between personal chats, groups and channels:
+   ```bash
+   curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" \
+     | python3 -c "import json,sys; [print(u['message']['chat']['id'], u['message']['chat'].get('title') or u['message']['chat'].get('first_name')) for u in json.load(sys.stdin)['result'] if 'message' in u]"
+   ```
+3. For a **group**, add the bot as a member; for a **channel**, add it as an admin.
+   Group ids are negative and supergroups start `-100`.
+4. Update `.env`, then `docker compose up -d` and send `/test` to confirm.
+
+**MEXC `requires protobuf to decode messages`** — MEXC streams binary protobuf
+frames. Fixed by the `[exchange]` extra, which now pins `protobuf>=5.29,<6`.
+Rebuild the image, or drop `mexc` from `exchange.exchanges`.
+
+**`-32005 limit exceeded` on `eth_getLogs`** — the endpoint caps block range or
+result count. The tracker now halves its span automatically on this error and
+widens again after sustained success, so it self-tunes. Persistent failures mean
+the endpoint is too restrictive — use a dedicated RPC.
+
+**Alerts repeating every second** — fixed. The interactive bot was broadcasting on
+every scoring cycle, bypassing the router's cooldown. Rebuild to pick up the fix.
+
+**Bot-farm alerts on assets you do not follow** — if you see social alerts without
+`X_BEARER_TOKEN` set, you are running a pre-fix image. Live mode used to fall back
+to a *simulated* social feed that injects fake campaigns. It now refuses and
+reports the module unhealthy instead. Rebuild.
+
 **Exchange 451/403** — geo-block, covered above. Drop the venue or change region.
 
 **Out of memory on the micro shape** — set `social.use_finbert: false` in

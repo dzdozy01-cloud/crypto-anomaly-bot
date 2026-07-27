@@ -80,8 +80,8 @@ class OnChainConfig(BaseModel):
             # Cloudflare were dropped: 521, auth-required and -32046 respectively
             # as of 2026-07. publicnode is the only free tier serving eth_getLogs
             # reliably, so it leads; 1rpc is the fallback (~2x slower but works).
-            "ethereum": "${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth}",
-            "bsc": "${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://bsc-dataseed.binance.org}",
+            "ethereum": "${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth,https://eth.drpc.org}",
+            "bsc": "${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://bsc-dataseed1.defibit.io,https://bsc-dataseed.binance.org}",
         }
     )
     solana_rpc: str = "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com}"

@@ -130,6 +130,7 @@ class SocialMonitor(Module):
         self.states: dict[str, TickerState] = {}
         self._batch: list[SocialPost] = []
         self._batch_lock = asyncio.Lock()
+        self.enabled_sources = True
         self.flush_interval_s = 2.0
         self.emit_interval_s = 5.0
 
@@ -183,10 +184,20 @@ class SocialMonitor(Module):
                     )
                 )
             if not self.sources:
-                self.log.warning(
-                    "no social credentials configured; running simulated social feed"
+                # NEVER silently substitute synthetic data in a live run. The
+                # simulator injects fake shill campaigns, which flow into the
+                # feature vector and produce real alerts about manipulation
+                # that never happened. Fabricated intelligence is strictly
+                # worse than an absent module: it is indistinguishable from a
+                # true positive and destroys trust in every other alert.
+                self.log.error(
+                    "SOCIAL MODULE DISABLED — no credentials configured. "
+                    "Set X_BEARER_TOKEN (and/or TELEGRAM_API_ID + telegram_channels) "
+                    "to enable it. Refusing to run a simulated feed in live mode; "
+                    "use `simulate: true` explicitly if you want synthetic data."
                 )
-                self.sources.append(SimulatedSocialSource(self.tickers))
+                self.enabled_sources = False
+                return
 
         for src in self.sources:
             self.supervise(
@@ -325,6 +336,9 @@ class SocialMonitor(Module):
 
     def health(self) -> dict[str, Any]:
         base = super().health()
+        if not self.enabled_sources:
+            base["healthy"] = False
+            base["error"] = "no social credentials configured — module inert"
         base["backend"] = self.scorer.backend if self.scorer else "loading"
         base["sources"] = [
             {"platform": s.platform, "enabled": s.enabled, "posts": s.posts_seen}

@@ -344,3 +344,72 @@ class TestBotCommands:
         _, bot = wired
         for name in ("help", "config", "status"):
             assert len(await bot.commands[name]([], 1)) < 4096
+
+
+class TestNoDuplicateBroadcast:
+    """Regression: ~60 identical alerts in 30s reached Telegram."""
+
+    @pytest_asyncio.fixture
+    async def app_with_bot(self):
+        from cadb.app import Application
+        from cadb.bot.telegram_bot import TelegramBot
+        from cadb.core.config import Settings
+
+        s = Settings()
+        s.exchange.enabled = s.onchain.enabled = s.social.enabled = False
+        s.ml.model_path = ""
+        s.alerts.dry_run = True
+        s.alerts.cooldown_s = 300
+        s.telemetry.log_level = "ERROR"
+        s.telemetry.state_file = ""
+        app = Application(s)
+        await app.setup()
+        bot = TelegramBot(token="")
+        bot.subscribers = {"1"}
+        app.bot = bot
+        bot.running = True
+        sent: list[str] = []
+
+        async def fake_send(chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+            sent.append(chat_id)
+            return True
+
+        bot.send = fake_send  # type: ignore[assignment]
+        yield app, sent
+
+    async def test_repeated_signals_broadcast_once(self, app_with_bot):
+        app, sent = app_with_bot
+        for _ in range(20):
+            await app._on_signal(_signal(85.0, "SOL"))
+        assert len(sent) <= 1, f"cooldown bypassed: {len(sent)} broadcasts"
+
+    async def test_suppressed_signal_is_not_broadcast(self, app_with_bot):
+        app, sent = app_with_bot
+        await app._on_signal(_signal(50.0, "SOL"))  # below threshold
+        assert sent == []
+
+    async def test_no_double_send_when_router_has_telegram(self, app_with_bot):
+        """If a Telegram sink already delivered it, the bot must not resend."""
+        from cadb.alerting.router import TelegramSink
+
+        app, sent = app_with_bot
+        app.router.sinks.clear()
+        sink = TelegramSink("token", "1")
+        delivered: list[str] = []
+
+        async def fake_deliver(signal) -> bool:
+            delivered.append(signal.asset_pair)
+            return True
+
+        sink.deliver = fake_deliver  # type: ignore[assignment]
+        app.router.add_sink(sink)
+
+        await app._on_signal(_signal(88.0, "BTC"))
+        assert len(delivered) == 1, "sink should deliver once"
+        assert sent == [], "bot must not duplicate the sink delivery"
+
+    async def test_escalation_still_reaches_user(self, app_with_bot):
+        app, sent = app_with_bot
+        await app._on_signal(_signal(82.0, "SOL", Severity.HIGH))
+        await app._on_signal(_signal(95.0, "SOL", Severity.CRITICAL))
+        assert len(sent) == 2, "severity escalation must break the cooldown"

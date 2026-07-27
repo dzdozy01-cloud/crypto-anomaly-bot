@@ -447,3 +447,83 @@ class TestExchangeEngine:
         assert MetricType.CVD in kinds
         assert all(-1.0 <= e.raw_value <= 1.0
                    for e in events if e.metric_type is MetricType.ORDER_BOOK)
+
+
+class TestNoSyntheticDataInLiveMode:
+    """Fabricated intelligence is worse than a missing module."""
+
+    async def test_social_refuses_simulator_without_credentials(self):
+        """Regression: live mode silently fell back to the simulator.
+
+        In production this injected fake shill campaigns that produced real
+        bot-farm alerts on SOL and DOGE — manipulation that never happened.
+        """
+        from cadb.modules.social.monitor import SocialMonitor
+
+        bus = InProcessBus()
+        await bus.start()
+        monitor = SocialMonitor(
+            bus,
+            SocialConfig(
+                simulate=False,          # LIVE mode
+                x_bearer_token="",       # no credentials
+                telegram_api_id="",
+                tracked_tickers=["BTC"],
+                use_finbert=False,
+            ),
+        )
+        await monitor.start()
+        await asyncio.sleep(0.3)
+        health = monitor.health()
+        sources = [type(s).__name__ for s in monitor.sources]
+        await monitor.stop()
+        await bus.close()
+
+        assert "SimulatedSocialSource" not in sources, "must not fabricate social data"
+        assert monitor.enabled_sources is False
+        assert health["healthy"] is False
+        assert "credentials" in health.get("error", "")
+
+    async def test_explicit_simulate_flag_still_works(self):
+        """Opting in to synthetic data must remain possible for demos/tests."""
+        from cadb.modules.social.monitor import SocialMonitor
+
+        bus = InProcessBus()
+        await bus.start()
+        monitor = SocialMonitor(
+            bus, SocialConfig(simulate=True, tracked_tickers=["BTC"], use_finbert=False)
+        )
+        await monitor.start()
+        await asyncio.sleep(0.2)
+        sources = [type(s).__name__ for s in monitor.sources]
+        await monitor.stop()
+        await bus.close()
+        assert "SimulatedSocialSource" in sources
+
+
+class TestAdaptiveBlockSpan:
+    def test_span_shrinks_on_limit_error_and_recovers(self):
+        from cadb.modules.onchain.tracker import _ChainCursor
+
+        c = _ChainCursor()
+        start = c.max_span
+        c.shrink()
+        assert c.max_span < start
+        assert c.max_span >= c.MIN_SPAN
+
+        for _ in range(30):
+            c.shrink()
+        assert c.max_span == c.MIN_SPAN, "must not shrink below the floor"
+
+        before = c.max_span
+        for _ in range(10):
+            c.grow()
+        assert c.max_span > before, "should widen again after sustained success"
+
+    def test_span_never_exceeds_ceiling(self):
+        from cadb.modules.onchain.tracker import _ChainCursor
+
+        c = _ChainCursor()
+        for _ in range(500):
+            c.grow()
+        assert c.max_span <= c.MAX_SPAN

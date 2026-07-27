@@ -105,9 +105,21 @@ class Application:
         if self.alerts_paused:
             log.debug("alerts paused; not dispatching %s", signal.asset_pair)
             return
+        # The router owns de-duplication (cooldown + severity escalation).
+        # The interactive bot must broadcast ONLY when the router actually
+        # dispatched, otherwise every scoring cycle re-sends the same alert:
+        # in production this produced ~60 identical messages in 30 seconds
+        # while the router correctly suppressed all but one.
+        dispatched = False
         if self.router:
-            await self.router.dispatch(signal)
-        if self.bot and self.bot.running:
+            dispatched = await self.router.dispatch(signal)
+
+        # Skip the bot broadcast when a Telegram sink already delivered it —
+        # otherwise subscribers get the same alert twice.
+        router_has_telegram = bool(
+            self.router and any(s.name == "telegram" for s in self.router.sinks)
+        )
+        if dispatched and not router_has_telegram and self.bot and self.bot.running:
             with contextlib.suppress(Exception):
                 await self.bot.broadcast_signal(signal)
 
@@ -119,8 +131,49 @@ class Application:
         register_commands(self.bot, self)
 
     # ---- lifecycle ---------------------------------------------------------
+    def _install_asyncio_exception_handler(self) -> None:
+        """Tame exceptions raised inside third-party asyncio callbacks.
+
+        ccxt.pro dispatches WebSocket frames from `call_soon` callbacks. When a
+        decode fails (e.g. MEXC protobuf frames without the protobuf package)
+        the traceback escapes to the default handler and prints a 25-line dump
+        for *every frame* — thousands of lines that bury real signal, while our
+        own supervisor never sees the error because it is not in the await path.
+        """
+        loop = asyncio.get_running_loop()
+        previous = loop.get_exception_handler()
+        seen: dict[str, int] = {}
+
+        def handler(loop_: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+            exc = context.get("exception")
+            name = type(exc).__name__ if exc else "unknown"
+            message = str(exc) if exc else context.get("message", "")
+
+            key = f"{name}:{message[:80]}"
+            count = seen.get(key, 0) + 1
+            seen[key] = count
+
+            # Log the first occurrence in full, then exponentially less often.
+            if count == 1 or (count & (count - 1)) == 0:
+                hint = ""
+                if "protobuf" in message.lower():
+                    hint = (
+                        " — install the exchange extra "
+                        "(`pip install 'cadb[exchange]'`) or drop this venue"
+                    )
+                log.warning(
+                    "suppressed callback error x%d: %s: %s%s",
+                    count, name, message[:200], hint,
+                )
+            if previous is not None:
+                return
+            # Deliberately swallow: the supervised task will reconnect.
+
+        loop.set_exception_handler(handler)
+
     async def start(self) -> None:
         self.started_at = time.monotonic()
+        self._install_asyncio_exception_handler()
         if self.bus is None:
             await self.setup()
 
