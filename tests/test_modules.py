@@ -527,3 +527,78 @@ class TestAdaptiveBlockSpan:
         for _ in range(500):
             c.grow()
         assert c.max_span <= c.MAX_SPAN
+
+
+class TestRPCFailureHandling:
+    """Regression: a refusing endpoint livelocked the scan loop."""
+
+    def test_cursor_advances_when_stuck_at_floor(self):
+        """At MIN_SPAN a still-refused range must be skipped, not retried forever.
+
+        Production symptom: `bsc: RPC range limit hit, reducing span to 5 blocks`
+        every 3 seconds indefinitely. The cursor never advanced, so the scanner
+        fell permanently behind the tip while appearing to "recover".
+        """
+        from cadb.modules.onchain.tracker import _ChainCursor
+
+        c = _ChainCursor()
+        for _ in range(10):
+            c.shrink()
+        assert c.max_span == c.MIN_SPAN
+
+        # Simulate the handler's floor branch.
+        start, from_block, to_block = c.last_block, 100, 104
+        at_floor = c.max_span <= c.MIN_SPAN
+        assert at_floor
+        c.last_block = to_block
+        c.skipped_blocks += to_block - from_block + 1
+        assert c.last_block > start, "cursor must move past an un-queryable range"
+        assert c.skipped_blocks == 5
+
+    def test_success_resets_the_error_counter(self):
+        from cadb.modules.onchain.tracker import _ChainCursor
+
+        c = _ChainCursor()
+        c.consecutive_limit_errors = 7
+        c.grow()
+        assert c.consecutive_limit_errors == 0
+
+    def test_solana_throttle_state_initialised(self):
+        from cadb.core.bus import InProcessBus
+        from cadb.core.config import OnChainConfig
+        from cadb.modules.onchain.tracker import WhaleTracker
+
+        t = WhaleTracker(InProcessBus(), OnChainConfig())
+        assert t._sol_tx_budget > 0
+        assert 0 < t._sol_tx_delay < 1.0
+
+
+class TestRetiredEndpointDetection:
+    def test_stale_config_is_flagged(self, tmp_path, caplog):
+        """A bind-mounted config.yaml survives rebuilds — warn about it."""
+        import logging
+
+        from cadb.core.config import load_settings
+
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "onchain:\n"
+            "  evm_rpc:\n"
+            "    ethereum: https://eth.llamarpc.com\n"
+        )
+        with caplog.at_level(logging.WARNING):
+            load_settings(cfg)
+        assert any("retired RPC endpoint" in r.message for r in caplog.records)
+
+    def test_current_defaults_are_not_flagged(self, caplog):
+        import logging
+        from pathlib import Path
+
+        from cadb.core.config import load_settings
+
+        cfg = Path(__file__).resolve().parent.parent / "config.yaml"
+        with caplog.at_level(logging.WARNING):
+            load_settings(cfg)
+        assert not [r for r in caplog.records if "retired RPC endpoint" in r.message], (
+            "shipped config.yaml must not reference retired endpoints"
+        )

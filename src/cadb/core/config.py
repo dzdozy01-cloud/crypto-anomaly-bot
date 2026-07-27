@@ -15,7 +15,19 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-__all__ = ["Settings", "load_settings"]
+__all__ = ["Settings", "load_settings", "RETIRED_ENDPOINTS"]
+
+# Endpoints removed from the defaults because they are dead or cannot serve
+# eth_getLogs. A bind-mounted config.yaml survives `docker compose build`, so a
+# stale file keeps pointing at these long after the image is updated — we detect
+# that explicitly rather than letting the user chase phantom RPC errors.
+RETIRED_ENDPOINTS: dict[str, str] = {
+    "llamarpc.com": "returns HTTP 521 (dead)",
+    "bsc-dataseed": "does not support eth_getLogs (-32005 on any range)",
+    "rpc.ankr.com": "now requires an API key",
+    "cloudflare-eth.com": "returns -32046 for eth_getLogs",
+    "meowrpc.com": "eth_getLogs not supported",
+}
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
@@ -76,12 +88,13 @@ class OnChainConfig(BaseModel):
     enabled: bool = True
     evm_rpc: dict[str, str] = Field(
         default_factory=lambda: {
-            # Verified-working public defaults with failover. llamarpc/Ankr/
-            # Cloudflare were dropped: 521, auth-required and -32046 respectively
-            # as of 2026-07. publicnode is the only free tier serving eth_getLogs
-            # reliably, so it leads; 1rpc is the fallback (~2x slower but works).
+            # Verified-working public defaults with failover, benchmarked
+            # against the exact eth_getLogs call Module 2 makes.
+            # Dropped: llamarpc (HTTP 521), Ankr (auth), Cloudflare (-32046),
+            # drpc (429), meowrpc + bsc-dataseed* (no eth_getLogs support at
+            # all — they reject even a 5-block range with -32005).
             "ethereum": "${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth,https://eth.drpc.org}",
-            "bsc": "${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://bsc-dataseed1.defibit.io,https://bsc-dataseed.binance.org}",
+            "bsc": "${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://1rpc.io/bnb}",
         }
     )
     solana_rpc: str = "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com}"
@@ -274,4 +287,23 @@ def load_settings(path: str | Path | None = None) -> Settings:
     data = _apply_env_overrides(data)
     settings = Settings.model_validate(data)
     # Expand env refs that came from *defaults* (not present in the YAML).
-    return Settings.model_validate(_expand(settings.model_dump()))
+    settings = Settings.model_validate(_expand(settings.model_dump()))
+    _warn_retired_endpoints(settings, path)
+    return settings
+
+
+def _warn_retired_endpoints(settings: Settings, path: str | Path | None) -> None:
+    """Log a clear warning when config still points at a retired endpoint."""
+    import logging
+
+    log = logging.getLogger(__name__)
+    configured = list(settings.onchain.evm_rpc.values()) + [settings.onchain.solana_rpc]
+    for url in configured:
+        for bad, reason in RETIRED_ENDPOINTS.items():
+            if bad in (url or ""):
+                log.warning(
+                    "config uses retired RPC endpoint '%s' (%s). "
+                    "Your %s is out of date — it is bind-mounted, so rebuilding "
+                    "the image does NOT update it. Run: ./deploy/update.sh --config",
+                    bad, reason, path or "config.yaml",
+                )

@@ -90,12 +90,15 @@ class _ChainCursor:
     MIN_SPAN: int = 5
     MAX_SPAN: int = 200
     _ok_streak: int = 0
+    consecutive_limit_errors: int = 0
+    skipped_blocks: int = 0
 
     def shrink(self) -> None:
         self.max_span = max(self.MIN_SPAN, self.max_span // 2)
         self._ok_streak = 0
 
     def grow(self) -> None:
+        self.consecutive_limit_errors = 0
         self._ok_streak += 1
         if self._ok_streak >= 10 and self.max_span < self.MAX_SPAN:
             self.max_span = min(self.MAX_SPAN, self.max_span * 2)
@@ -125,6 +128,10 @@ class WhaleTracker(Module):
         self.recent_whales: deque[WhaleTransfer] = deque(maxlen=1000)
         self._sol_seen: deque[str] = deque(maxlen=4000)
         self._sol_seen_set: set[str] = set()
+        # Adaptive Solana throttle (public RPCs ~10 req/s).
+        self._sol_tx_budget: int = 6      # max getTransaction calls per wallet
+        self._sol_tx_delay: float = 0.15  # pacing between calls
+        self._sol_429s: int = 0
         self.net_flow_usd: dict[str, float] = {}
 
     # ---- lifecycle -----------------------------------------------------
@@ -222,11 +229,33 @@ class WhaleTracker(Module):
                 msg = str(exc).lower()
                 if any(k in msg for k in ("limit exceeded", "too many", "range",
                                           "query returned more than", "-32005")):
+                    at_floor = cursor.max_span <= cursor.MIN_SPAN
                     cursor.shrink()
-                    self.log.warning(
-                        "%s: RPC range limit hit, reducing span to %d blocks",
-                        chain, cursor.max_span,
-                    )
+                    cursor.consecutive_limit_errors += 1
+
+                    if at_floor:
+                        # Already at the minimum span and still refused. Retrying
+                        # the identical request forever is a livelock: the cursor
+                        # never advances, so the scanner falls permanently behind
+                        # the chain tip while logging the same line every 3s.
+                        # Skip the offending range and keep moving — better to
+                        # miss a few blocks than to stop monitoring the chain.
+                        cursor.last_block = to_block
+                        cursor.skipped_blocks += to_block - from_block + 1
+                        if cursor.consecutive_limit_errors % 20 == 1:
+                            self.log.error(
+                                "%s: endpoint refuses even %d-block queries — "
+                                "skipping blocks %d-%d (%d skipped so far). "
+                                "This RPC cannot support log scanning; set a "
+                                "dedicated %s_RPC_URL.",
+                                chain, cursor.MIN_SPAN, from_block, to_block,
+                                cursor.skipped_blocks, chain.upper(),
+                            )
+                    elif cursor.consecutive_limit_errors <= 5:
+                        self.log.warning(
+                            "%s: RPC range limit hit, reducing span to %d blocks",
+                            chain, cursor.max_span,
+                        )
                     await asyncio.sleep(self.config.poll_interval_s)
                     continue
                 raise
@@ -318,15 +347,54 @@ class WhaleTracker(Module):
         while True:
             for wallet in watched:
                 sigs = await self.solana.get_signatures(wallet, limit=20)
+                fetched = 0
                 for sig_info in sigs:
                     sig = sig_info.get("signature", "")
                     if not sig or sig in self._sol_seen_set or sig_info.get("err"):
                         continue
                     self._remember_sig(sig)
-                    tx = await self.solana.get_transaction(sig)
+
+                    # Public Solana RPCs allow roughly 10 req/s. A hot CEX
+                    # wallet produces dozens of signatures per poll, and
+                    # fetching every transaction immediately guarantees a 429
+                    # storm that starves the whole loop. Cap the per-wallet
+                    # budget and pace the calls so we degrade to *sampling*
+                    # rather than failing outright.
+                    if fetched >= self._sol_tx_budget:
+                        break
+                    fetched += 1
+                    await asyncio.sleep(self._sol_tx_delay)
+
+                    try:
+                        tx = await self.solana.get_transaction(sig)
+                    except Exception as exc:
+                        if "429" in str(exc) or "rate limit" in str(exc).lower():
+                            # Back off adaptively instead of tearing down the
+                            # supervised task and reconnecting in a tight loop.
+                            self._sol_tx_delay = min(2.0, self._sol_tx_delay * 1.8)
+                            self._sol_tx_budget = max(2, self._sol_tx_budget - 1)
+                            self._sol_429s += 1
+                            if self._sol_429s % 25 == 1:
+                                self.log.warning(
+                                    "solana RPC rate limited — throttling to "
+                                    "%d tx/wallet every %.2fs (%d hits). "
+                                    "Set SOLANA_RPC_URL to a dedicated endpoint.",
+                                    self._sol_tx_budget, self._sol_tx_delay,
+                                    self._sol_429s,
+                                )
+                            await asyncio.sleep(2.0)
+                            break
+                        raise
+
                     if not tx:
                         continue
                     await self._process_solana_tx(tx, wallet, sig, sig_info)
+                else:
+                    # Wallet processed cleanly — cautiously relax the throttle.
+                    self._sol_tx_delay = max(0.12, self._sol_tx_delay * 0.95)
+                    if self._sol_tx_budget < 8:
+                        self._sol_tx_budget += 1
+
                 await asyncio.sleep(0.35)  # spread RPC load across wallets
             await asyncio.sleep(self.config.poll_interval_s)
 

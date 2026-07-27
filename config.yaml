@@ -35,7 +35,7 @@ onchain:
   enabled: true
   evm_rpc:                          # comma-separate for automatic failover
     ethereum: ${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth}
-    bsc: ${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://bsc-dataseed.binance.org}
+    bsc: ${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://1rpc.io/bnb}
   solana_rpc: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com}
   poll_interval_s: 3.0
   whale_threshold_usd: 500000       # flag CEX flows above $500k

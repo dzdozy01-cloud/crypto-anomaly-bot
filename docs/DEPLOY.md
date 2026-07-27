@@ -254,6 +254,18 @@ now replies telling you the correct value.
 frames. Fixed by the `[exchange]` extra, which now pins `protobuf>=5.29,<6`.
 Rebuild the image, or drop `mexc` from `exchange.exchanges`.
 
+**Old RPC endpoints persist after a rebuild** — `config.yaml` is *bind-mounted*
+from `~/cadb`, so it overrides the copy inside the image. `docker compose build`
+does **not** update it. If logs still reference `llamarpc` or `bsc-dataseed`
+after updating, your local file is stale:
+
+```bash
+./deploy/update.sh --config     # backs up, then installs the current config
+```
+
+The app now detects this itself and logs which retired endpoint you are using
+and why it was dropped.
+
 **`-32005 limit exceeded` on `eth_getLogs`** — the endpoint caps block range or
 result count. The tracker now halves its span automatically on this error and
 widens again after sustained success, so it self-tunes. Persistent failures mean
