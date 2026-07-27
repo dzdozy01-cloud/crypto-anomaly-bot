@@ -354,7 +354,9 @@ at a literal placeholder string.
 Layered: **defaults → `config.yaml` → environment**. Secrets never live in the YAML;
 use `${VAR}` or `${VAR:-default}` references.
 
-**Only two variables are required** — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+**No exchange API keys are needed** — CADB reads public market data only and never
+places orders. **Etherscan is not used** either; the on-chain tracker speaks raw
+JSON-RPC. **Only two variables are required** — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 Everything else has a working default or degrades gracefully; the system starts
 with a completely empty environment. Full reference: **[docs/SETUP.md](docs/SETUP.md)**.
 

@@ -39,26 +39,89 @@ negative one (`-1001234567890`). For a channel, add the bot as an **admin** firs
 
 ## Tier 2 — Strongly recommended
 
-The public RPC defaults work, but they are rate-limited and slow enough to make
-Module 2 miss blocks under load. A free Alchemy/Ankr/QuickNode key fixes that.
+### Exchange API keys: not needed, ever
 
-| Variable | Default if unset | Why override |
-|---|---|---|
-| `ETH_RPC_URL` | `https://eth.llamarpc.com` | Public node — rate-limited, misses blocks |
-| `BSC_RPC_URL` | `https://binance.llamarpc.com` | Same |
-| `SOLANA_RPC_URL` | `https://api.mainnet-beta.solana.com` | Heavily throttled; SPL scanning suffers most |
+CADB reads **public market data only** — L2 order books and the trade tape. Those
+streams are unauthenticated on every supported venue. There is no `apiKey` field
+anywhere in the exchange layer, because the bot never places an order, never reads
+a balance, and never touches a private endpoint.
+
+Verified with no credentials at all:
+
+```
+200  https://api.mexc.com/api/v3/ping        # public data, no auth
+```
+
+**Do not create exchange API keys for this.** A surveillance tool that only reads
+public tape has no reason to hold a key that could trade or withdraw. If you ever
+extend CADB to place orders, that is the moment to introduce keys — with
+withdrawal permission disabled and IP allow-listing on.
+
+> **Geo-blocking is a separate issue.** Binance returns HTTP `451` and Bybit `403`
+> from many datacenter IPs (AWS/GCP US and EU regions especially). That is a legal
+> region block, *not* an auth failure — a key would not fix it. If you hit this,
+> host the bot somewhere unblocked, or drop the affected venue from
+> `exchange.exchanges` in `config.yaml`. MEXC is generally the most permissive.
+
+### Etherscan: not used
+
+CADB talks **raw JSON-RPC** to nodes, not block-explorer APIs. No `ETHERSCAN_API_KEY`
+exists in the config. The tracker uses `eth_getLogs`, `eth_call`,
+`eth_getBlockByNumber` and `eth_blockNumber` on EVM chains, plus
+`getSignaturesForAddress` / `getTransaction` on Solana.
+
+This is deliberate. Explorer APIs cap you at ~5 req/s, add indexing lag, and would
+put a third party between you and consensus. Direct RPC gives lower latency and no
+dependency on someone else's index.
+
+### RPC endpoints: the one thing genuinely worth paying for
+
+The defaults work but are the weakest link. Measured 2026-07 (`eth_getLogs` over
+3 blocks of USDT transfers — the exact call Module 2 makes every poll):
+
+| Endpoint | Result |
+|---|---|
+| `ethereum-rpc.publicnode.com` | ✅ 364 logs in **539 ms** — current default |
+| `1rpc.io/eth` | ✅ 364 logs in **1192 ms** — fallback default |
+| `eth.llamarpc.com` | ❌ HTTP 521 — dead |
+| `rpc.ankr.com/eth` | ❌ `Unauthorized` — now needs a key |
+| `cloudflare-eth.com` | ❌ `-32046 Cannot fulfill request` |
+| `eth.drpc.org` | ❌ HTTP 408 timeout on `getLogs` |
+| `eth.meowrpc.com` | ❌ `eth_getLogs is not supported` |
+
+**What rate limiting actually costs you.** Module 2 polls every 3 s and requests
+logs for a block range. On a throttled public node you get HTTP 429s, the circuit
+breaker opens, and the scanner falls behind the chain tip. It catches up by widening
+the range — but a whale deposit detected 90 seconds late is worth far less than one
+detected in the same block. Modules 1, 3 and 4 are unaffected; you lose on-chain
+timeliness, not the whole system.
+
+A free tier from Alchemy, Infura or QuickNode (~100M compute units/month) is far
+more than this workload needs and removes the problem entirely:
 
 ```bash
 ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 SOLANA_RPC_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR_KEY
 ```
 
-**Failover:** comma-separate multiple endpoints. The client rotates on failure and
-opens a circuit breaker per endpoint.
+**Failover is built in** — comma-separate endpoints and the client rotates on
+failure, with an independent circuit breaker per endpoint:
 
 ```bash
-ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/KEY,https://rpc.ankr.com/eth
+ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/KEY,https://ethereum-rpc.publicnode.com
 ```
+
+Verified: with a dead endpoint first in the list, the request still succeeds on the
+next one and the dead host is marked failed.
+
+| Variable | Default (comma = failover order) |
+|---|---|
+| `ETH_RPC_URL` | `ethereum-rpc.publicnode.com,1rpc.io/eth` |
+| `BSC_RPC_URL` | `bsc-rpc.publicnode.com,bsc-dataseed.binance.org` |
+| `SOLANA_RPC_URL` | `api.mainnet-beta.solana.com,solana-rpc.publicnode.com` |
+
+Both Solana defaults responded in **75-85 ms**, so Solana is in better shape than
+Ethereum on free infrastructure.
 
 ---
 
@@ -180,7 +243,7 @@ Verified with a completely empty environment:
 
 | Component | Behaviour |
 |---|---|
-| Exchange engine | ✅ Fully working — public WebSockets need no auth |
+| Exchange engine | ✅ Fully working — public WebSockets need no auth, no API keys ever |
 | On-chain tracker | ⚠️ Works on rate-limited public RPCs |
 | Social monitor | ⚠️ No credentials → source skipped; lexicon sentiment backend |
 | ML classifier | ✅ Fully working — bootstraps on the synthetic corpus |

@@ -34,9 +34,9 @@ exchange:
 onchain:
   enabled: true
   evm_rpc:                          # comma-separate for automatic failover
-    ethereum: ${ETH_RPC_URL:-https://eth.llamarpc.com}
-    bsc: ${BSC_RPC_URL:-https://binance.llamarpc.com}
-  solana_rpc: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+    ethereum: ${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth}
+    bsc: ${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://bsc-dataseed.binance.org}
+  solana_rpc: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com}
   poll_interval_s: 3.0
   whale_threshold_usd: 500000       # flag CEX flows above $500k
   liquidity_drop_pct: 30            # flag >30% single-block LP drops

@@ -63,11 +63,15 @@ class OnChainConfig(BaseModel):
     enabled: bool = True
     evm_rpc: dict[str, str] = Field(
         default_factory=lambda: {
-            "ethereum": "${ETH_RPC_URL:-https://eth.llamarpc.com}",
-            "bsc": "${BSC_RPC_URL:-https://binance.llamarpc.com}",
+            # Verified-working public defaults with failover. llamarpc/Ankr/
+            # Cloudflare were dropped: 521, auth-required and -32046 respectively
+            # as of 2026-07. publicnode is the only free tier serving eth_getLogs
+            # reliably, so it leads; 1rpc is the fallback (~2x slower but works).
+            "ethereum": "${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth}",
+            "bsc": "${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://bsc-dataseed.binance.org}",
         }
     )
-    solana_rpc: str = "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
+    solana_rpc: str = "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com}"
     poll_interval_s: float = 3.0
     whale_threshold_usd: float = 500_000.0
     liquidity_drop_pct: float = 30.0
