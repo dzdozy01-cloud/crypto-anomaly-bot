@@ -117,7 +117,12 @@ class WhaleTracker(Module):
             return
 
         for chain, url in self.config.evm_rpc.items():
-            if not url:
+            if not url or not url.strip():
+                self.log.error(
+                    "chain %s has no RPC endpoint configured — it will NOT be monitored. "
+                    "Set %s_RPC_URL or remove the chain from config.yaml",
+                    chain, chain.upper(),
+                )
                 continue
             urls = [u.strip() for u in url.split(",") if u.strip()]
             self.evm[chain] = EVMClient(urls, chain=chain, rate_per_sec=12.0)
@@ -128,7 +133,11 @@ class WhaleTracker(Module):
                 BackoffPolicy(initial=2.0, maximum=120.0),
             )
 
-        if self.config.solana_rpc:
+        if not self.config.solana_rpc or not self.config.solana_rpc.strip():
+            self.log.warning(
+                "no Solana RPC configured — SPL whale tracking disabled"
+            )
+        if self.config.solana_rpc and self.config.solana_rpc.strip():
             self.solana = SolanaClient(
                 [u.strip() for u in self.config.solana_rpc.split(",") if u.strip()],
                 chain="solana",
@@ -549,6 +558,11 @@ class WhaleTracker(Module):
     # ---- introspection ----------------------------------------------------
     def health(self) -> dict[str, Any]:
         base = super().health()
+        # A tracker with no data sources is not "healthy" — it is silently
+        # doing nothing, which is far more dangerous than an obvious failure.
+        if not self.config.simulate and not self.evm and self.solana is None:
+            base["healthy"] = False
+            base["error"] = "no RPC endpoints configured — module is inert"
         base["chains"] = {c: cl.health() for c, cl in self.evm.items()}
         if self.solana:
             base["chains"]["solana"] = self.solana.health()

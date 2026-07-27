@@ -233,6 +233,24 @@ class TestOnChain:
         assert transfers[0]["delta"] == pytest.approx(1000.0)
         assert transfers[0]["owner"] == "OWNER1"
 
+    async def test_tracker_without_endpoints_reports_unhealthy(self):
+        """An inert module must never report healthy — silence is the worst failure."""
+        from cadb.modules.onchain.tracker import WhaleTracker
+
+        bus = InProcessBus()
+        await bus.start()
+        tracker = WhaleTracker(
+            bus, OnChainConfig(evm_rpc={"ethereum": ""}, solana_rpc="")
+        )
+        await tracker.start()
+        await asyncio.sleep(0.2)
+        health = tracker.health()
+        await tracker.stop()
+        await bus.close()
+
+        assert health["healthy"] is False
+        assert "no RPC endpoints" in health.get("error", "")
+
     async def test_whale_tracker_emits_above_threshold(self):
         from cadb.modules.onchain.tracker import WhaleTracker
 

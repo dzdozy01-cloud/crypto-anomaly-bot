@@ -200,6 +200,42 @@ X_BEARER_TOKEN=...
 
 ---
 
+## Blank vs. commented: both safe
+
+`${VAR:-default}` uses POSIX **colon-dash** semantics — the default applies when a
+variable is unset **or set-but-empty**. So both of these use the built-in default:
+
+```bash
+#ETH_RPC_URL=              # commented out  → default
+ETH_RPC_URL=               # blank          → default (also fine)
+ETH_RPC_URL=https://...    # set            → your value wins
+```
+
+Commenting out is clearer, which is how `.env.example` now ships.
+
+> This was a genuine bug until recently: a blank `ETH_RPC_URL=` was treated as a
+> deliberate empty override, which left the on-chain tracker with **zero
+> endpoints** — and it still reported itself healthy. Both halves are fixed:
+> empty now means "not configured", and a tracker with no endpoints reports
+> `healthy: false` with an explicit error.
+
+Confirm what your config actually resolved to:
+
+```bash
+cadb validate -c config.yaml
+```
+
+```
+  on-chain endpoints:
+    ✅ ethereum  ethereum-rpc.publicnode.com (+1 failover)
+    ✅ bsc       bsc-rpc.publicnode.com (+1 failover)
+    ✅ solana    api.mainnet-beta.solana.com (+1 failover)
+```
+
+A `❌ NOT CONFIGURED` line means that chain is not being monitored at all.
+
+---
+
 ## Loading and verifying
 
 ```bash

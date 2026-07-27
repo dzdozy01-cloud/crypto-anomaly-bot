@@ -324,6 +324,64 @@ class TestConfig:
         cfg.write_text("onchain:\n  solana_rpc: ${UNSET_VAR_ABC:-https://fallback.rpc}\n")
         assert load_settings(cfg).onchain.solana_rpc == "https://fallback.rpc"
 
+    def test_empty_env_var_falls_back_to_default(self, tmp_path, monkeypatch):
+        """A blank `.env` line must not override a working default.
+
+        Regression: `.env.example` shipped `ETH_RPC_URL=` as a placeholder.
+        Sourcing it defined the variable as an empty string, `${VAR:-default}`
+        treated that as a deliberate override, and the entire on-chain module
+        went inert while still reporting itself healthy.
+        """
+        monkeypatch.setenv("ETH_RPC_URL", "")
+        monkeypatch.setenv("SOLANA_RPC_URL", "")
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "onchain:\n"
+            "  evm_rpc:\n"
+            "    ethereum: ${ETH_RPC_URL:-https://default.example/eth}\n"
+            "  solana_rpc: ${SOLANA_RPC_URL:-https://default.example/sol}\n"
+        )
+        s = load_settings(cfg)
+        assert s.onchain.evm_rpc["ethereum"] == "https://default.example/eth"
+        assert s.onchain.solana_rpc == "https://default.example/sol"
+
+    def test_set_env_var_still_overrides(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ETH_RPC_URL", "https://mine.example/eth")
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "onchain:\n  evm_rpc:\n    ethereum: ${ETH_RPC_URL:-https://default.example/eth}\n"
+        )
+        assert load_settings(cfg).onchain.evm_rpc["ethereum"] == "https://mine.example/eth"
+
+    def test_blank_cadb_override_is_ignored(self, tmp_path, monkeypatch):
+        """An empty CADB_* override must not wipe out a configured value."""
+        monkeypatch.setenv("CADB_ALERT_THRESHOLD", "")
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("ml:\n  alert_threshold: 72\n")
+        assert load_settings(cfg).ml.alert_threshold == 72.0
+
+    def test_shipped_env_example_keeps_defaults_working(self, tmp_path, monkeypatch):
+        """Source the real .env.example and assert nothing breaks."""
+        import re
+        from pathlib import Path
+
+        example = Path(__file__).resolve().parent.parent / ".env.example"
+        for line in example.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if re.fullmatch(r"[A-Z0-9_]+", key.strip()):
+                monkeypatch.setenv(key.strip(), val.strip())
+
+        s = load_settings(
+            Path(__file__).resolve().parent.parent / "config.yaml"
+        )
+        eth = [u for u in s.onchain.evm_rpc["ethereum"].split(",") if u.strip()]
+        sol = [u for u in s.onchain.solana_rpc.split(",") if u.strip()]
+        assert eth, "on-chain module would be inert with the shipped .env.example"
+        assert sol, "solana tracking would be disabled with the shipped .env.example"
+
     def test_tracked_assets_union(self):
         s = Settings()
         s.exchange.symbols = ["BTC/USDT", "ETH/USDT"]

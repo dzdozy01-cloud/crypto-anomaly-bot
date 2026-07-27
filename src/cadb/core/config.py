@@ -21,10 +21,23 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
 
 def _expand(value: Any) -> Any:
-    """Recursively expand ``${VAR}`` / ``${VAR:-default}`` references."""
+    """Recursively expand ``${VAR}`` / ``${VAR:-default}`` references.
+
+    ``${VAR:-default}`` follows POSIX *colon-dash* semantics: the default is used
+    when the variable is unset **or set-but-empty**. This matters enormously in
+    practice — a ``.env`` file containing a blank placeholder line like
+    ``ETH_RPC_URL=`` defines the variable as an empty string, and treating that
+    as a deliberate override silently disabled the entire on-chain module while
+    it still reported itself healthy. An empty value means "not configured".
+    """
     if isinstance(value, str):
         def sub(m: re.Match[str]) -> str:
-            return os.getenv(m.group(1), m.group(2) or "")
+            var, default = m.group(1), m.group(2)
+            env_value = os.getenv(var)
+            if env_value:
+                return env_value
+            # unset, or set-but-empty -> fall back to the default (if any)
+            return default or ""
 
         return _ENV_PATTERN.sub(sub, value)
     if isinstance(value, dict):
@@ -228,7 +241,9 @@ _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
 def _apply_env_overrides(data: dict[str, Any]) -> dict[str, Any]:
     for env_key, path in _ENV_OVERRIDES.items():
         raw = os.getenv(env_key)
-        if raw is None:
+        # Blank overrides are placeholders, not intent — ignore them so an
+        # empty line in .env cannot wipe out a working default.
+        if not raw:
             continue
         node: Any = data
         for part in path[:-1]:

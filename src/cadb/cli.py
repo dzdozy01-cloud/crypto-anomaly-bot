@@ -161,9 +161,34 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"  bus:        {settings.bus.kind}")
     print(f"  exchanges:  {', '.join(settings.exchange.exchanges)} "
           f"({len(settings.exchange.symbols)} symbols)")
-    print(f"  chains:     {', '.join(settings.onchain.evm_rpc)} + solana")
     print(f"  tickers:    {', '.join(settings.social.tracked_tickers[:8])}")
     print(f"  threshold:  {settings.ml.alert_threshold:.0f}")
+
+    # Resolve RPC endpoints explicitly. An empty endpoint silently disables a
+    # chain, so surface exactly what each one resolved to rather than just
+    # listing the chain names.
+    print("\n  on-chain endpoints:")
+    inert = True
+    for chain, url in settings.onchain.evm_rpc.items():
+        endpoints = [u.strip() for u in (url or "").split(",") if u.strip()]
+        if endpoints:
+            inert = False
+            host = endpoints[0].split("/")[2] if "//" in endpoints[0] else endpoints[0]
+            extra = f" (+{len(endpoints) - 1} failover)" if len(endpoints) > 1 else ""
+            print(f"    ✅ {chain:<9} {host}{extra}")
+        else:
+            print(f"    ❌ {chain:<9} NOT CONFIGURED — this chain will not be monitored")
+    sol = [u.strip() for u in (settings.onchain.solana_rpc or "").split(",") if u.strip()]
+    if sol:
+        inert = False
+        host = sol[0].split("/")[2] if "//" in sol[0] else sol[0]
+        extra = f" (+{len(sol) - 1} failover)" if len(sol) > 1 else ""
+        print(f"    ✅ {'solana':<9} {host}{extra}")
+    else:
+        print(f"    ❌ {'solana':<9} NOT CONFIGURED — SPL tracking disabled")
+    if inert and settings.onchain.enabled and not settings.onchain.simulate:
+        print("\n  ⚠️  on-chain module has NO endpoints and will do nothing.")
+        print("     Comment out the *_RPC_URL lines in .env to use the defaults.")
     sinks = []
     if settings.alerts.telegram_bot_token and settings.alerts.telegram_chat_id:
         sinks.append("telegram")
