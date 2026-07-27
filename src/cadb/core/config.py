@@ -27,6 +27,10 @@ RETIRED_ENDPOINTS: dict[str, str] = {
     "rpc.ankr.com": "now requires an API key",
     "cloudflare-eth.com": "returns -32046 for eth_getLogs",
     "meowrpc.com": "eth_getLogs not supported",
+    "bsc-dataseed1.ninicoin.io": "does not support eth_getLogs",
+    "bsc-dataseed.bnbchain.org": "does not support eth_getLogs",
+    "endpoints.omniatech.io": "returns HTTP 521",
+    "blockpi.network": "returns HTTP 521",
 }
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
@@ -93,8 +97,15 @@ class OnChainConfig(BaseModel):
             # Dropped: llamarpc (HTTP 521), Ankr (auth), Cloudflare (-32046),
             # drpc (429), meowrpc + bsc-dataseed* (no eth_getLogs support at
             # all — they reject even a 5-block range with -32005).
+            #
+            # BSC order is by *sustained* throughput, not one-off latency:
+            # under 12 rounds of continuous 20-block polling, publicnode failed
+            # 8/12 despite passing single probes, while nodereal (116ms median,
+            # 12/12) and blockrazor (217ms, 12/12) held up. Endpoints that look
+            # healthy on a single request but collapse under a real poll loop
+            # are the worst kind of default — they fail only in production.
             "ethereum": "${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com,https://1rpc.io/eth,https://eth.drpc.org}",
-            "bsc": "${BSC_RPC_URL:-https://bsc-rpc.publicnode.com,https://1rpc.io/bnb}",
+            "bsc": "${BSC_RPC_URL:-https://bsc-mainnet.nodereal.io/v1/64a9df0874fb4a93b9d0a3849de012d3,https://bsc.blockrazor.xyz,https://bsc-rpc.publicnode.com}",
         }
     )
     solana_rpc: str = "${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com,https://solana-rpc.publicnode.com}"

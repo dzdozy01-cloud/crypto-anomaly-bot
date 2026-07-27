@@ -413,3 +413,40 @@ class TestDeployScripts:
         text = (Path(__file__).resolve().parent.parent / "deploy" / "update.sh").read_text()
         assert "is-inside-work-tree" in text, "must detect a git checkout"
         assert "git checkout -- config.yaml" in text, "git layout should reset, not cp"
+
+
+class TestBSCEndpointDefaults:
+    """BSC endpoints were selected by measurement; guard against regression."""
+
+    def test_no_dataseed_endpoints_in_defaults(self):
+        """bsc-dataseed* cannot serve eth_getLogs — verified across 4 variants.
+
+        They answer eth_call and eth_blockNumber normally, so a shallow health
+        check passes while Module 2 is completely non-functional.
+        """
+        from cadb.core.config import Settings
+
+        bsc = Settings().onchain.evm_rpc.get("bsc", "")
+        assert "dataseed" not in bsc, f"dataseed endpoint reintroduced: {bsc}"
+
+    def test_bsc_has_failover_endpoints(self):
+        from cadb.core.config import Settings
+
+        endpoints = [u for u in Settings().onchain.evm_rpc["bsc"].split(",") if u.strip()]
+        assert len(endpoints) >= 2, "BSC needs failover; its public tier is unreliable"
+
+    def test_retired_list_covers_all_tested_failures(self):
+        from cadb.core.config import RETIRED_ENDPOINTS
+
+        for host in ("bsc-dataseed", "llamarpc.com", "blockpi.network"):
+            assert any(host in k for k in RETIRED_ENDPOINTS), f"{host} not flagged"
+
+    def test_every_chain_default_is_reachable_syntax(self):
+        """Defaults must be well-formed URLs with a scheme."""
+        from cadb.core.config import Settings
+
+        s = Settings()
+        urls = [u for v in s.onchain.evm_rpc.values() for u in v.split(",")]
+        urls += s.onchain.solana_rpc.split(",")
+        for u in filter(None, (x.strip() for x in urls)):
+            assert u.startswith("https://"), f"insecure or malformed endpoint: {u}"

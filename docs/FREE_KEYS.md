@@ -9,7 +9,7 @@ Nothing below requires a credit card.
 |---|---|---|---|
 | 1 | **Alchemy** (ETH + Solana) | RPC rate limits, missed whale moves | 5 min |
 | 2 | **X / Twitter** | Re-enables the whole social module | 15 min |
-| 3 | **Alchemy BSC** or **Chainstack** | BSC `eth_getLogs` limits | 2 min |
+| 3 | **NodeReal** (optional) | Extra BSC headroom — defaults already work | 2 min |
 
 ---
 
@@ -94,26 +94,90 @@ happens there anyway:
 
 ---
 
-## 3. BSC — only if you want Binance Smart Chain
+## 3. BSC (Binance Smart Chain)
 
-The public BSC nodes that survive are already configured, but if you hit limits:
+**You probably don't need a key.** The configured defaults are free, keyless, and
+were selected by measurement rather than reputation. But BSC's public endpoint
+landscape is the worst of the three chains, so it's worth understanding why.
 
-- **Alchemy** supports BSC — create a third app, same account, same 30M CU pool.
-- **Chainstack** free tier has good BSC coverage.
+### The trap: most "official" BSC endpoints cannot do `eth_getLogs`
 
-```bash
-BSC_RPC_URL=https://bnb-mainnet.g.alchemy.com/v2/YOUR_KEY
+Every `bsc-dataseed*` endpoint — including Binance's own — rejects log queries
+outright with `-32005 limit exceeded`, **even for a single block**. They serve
+`eth_call` and `eth_blockNumber` fine, which is why they look healthy in a naive
+check, but Module 2 lives on `eth_getLogs` and cannot use them at all.
+
+Measured against a real USDT transfer query:
+
+| Endpoint | 5 blk | 20 blk | 50 blk |
+|---|---|---|---|
+| `bsc-mainnet.nodereal.io/v1/64a9df...` | ✅ 135ms | ✅ 154ms | ✅ **197ms** |
+| `bsc.blockrazor.xyz` | ✅ 142ms | ✅ 214ms | ❌ |
+| `bsc-rpc.publicnode.com` | ✅ 269ms | ✅ 373ms | ✅ 514ms |
+| `1rpc.io/bnb` | ✅ 403ms | ✅ 835ms | ✅ 1145ms |
+| `bsc-dataseed.binance.org` | ❌ limit | ❌ limit | ❌ limit |
+| `bsc-dataseed1.defibit.io` | ❌ limit | ❌ limit | ❌ limit |
+| `bsc-dataseed1.ninicoin.io` | ❌ limit | ❌ limit | ❌ limit |
+| `bsc-dataseed.bnbchain.org` | ❌ limit | ❌ limit | ❌ limit |
+| `binance.llamarpc.com` | ❌ unreachable | | |
+| `bsc.blockpi.network/.../public` | ❌ HTTP 521 | | |
+
+### Single probes lie — test *sustained* load
+
+More important: an endpoint that passes a one-off probe can still collapse under
+a real poll loop. Twelve consecutive 20-block queries at 0.5s spacing:
+
+| Endpoint | Result | Median | Notes |
+|---|---|---|---|
+| `nodereal` | ✅ **12/12** | 116ms | rock solid |
+| `blockrazor` | ✅ **12/12** | 217ms | rock solid |
+| `1rpc.io/bnb` | ⚠️ 9/12 | 847ms | 3× rate-limited |
+| `publicnode` | ❌ **4/12** | 303ms | fails under sustained load |
+
+`publicnode` was CADB's BSC default until this test — it passes every single
+probe and then fails two thirds of a real workload. That is the worst failure
+mode a default can have, because it only shows up in production.
+
+**Current default order** (failover is automatic, left to right):
+
+```
+bsc-mainnet.nodereal.io  →  bsc.blockrazor.xyz  →  bsc-rpc.publicnode.com
 ```
 
-Or simply drop BSC — most manipulation worth catching happens on Ethereum and
-Solana:
+### If you do want a dedicated BSC key
+
+Worth it if you widen `tracked_tokens` beyond USDT, or want headroom.
+
+| Provider | Free tier | Notes |
+|---|---|---|
+| **[NodeReal](https://nodereal.io/)** | 3M CU/day | BSC specialists — built by the Binance ecosystem. Best BSC free tier. |
+| **[Alchemy](https://www.alchemy.com/)** | 30M CU/mo shared | Reuse the account from step 1; add a third app. Simplest if you already signed up. |
+| **[Chainstack](https://chainstack.com/)** | 3M req/mo | Clean 1-call-=-1-request billing, no CU arithmetic. |
+| **[QuickNode](https://www.quicknode.com/)** | 10M credits | Fast, but the free tier is trial-shaped. |
+
+NodeReal: sign up → **Create App** → BSC Mainnet → copy the HTTPS URL.
+
+```bash
+BSC_RPC_URL=https://bsc-mainnet.nodereal.io/v1/YOUR_KEY,https://bsc.blockrazor.xyz
+```
+
+Always keep a keyless endpoint as the trailing fallback — if your quota runs out
+mid-month, the tracker degrades instead of going dark.
+
+### Or just turn BSC off
+
+Most manipulation worth catching happens on Ethereum and Solana. BSC's value is
+mainly low-cap tokens, which you may not be tracking anyway. In `config.yaml`:
 
 ```yaml
 onchain:
   evm_rpc:
     ethereum: ${ETH_RPC_URL:-https://ethereum-rpc.publicnode.com}
-    # bsc: removed
+    # bsc:  disabled — remove the line entirely
 ```
+
+CADB logs an explicit error for any chain with no endpoint, so a disabled chain
+is always visible rather than silently absent.
 
 ---
 

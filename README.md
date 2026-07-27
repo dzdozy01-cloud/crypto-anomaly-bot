@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 179 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 184 tests passing.
 
 ---
 
@@ -320,7 +320,7 @@ src/cadb/
 ├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 179 tests
+tests/                 184 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -347,7 +347,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 179 tests, ~2 min
+pytest tests/ -v                                  # 184 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 
