@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 138 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 149 tests passing.
 
 ---
 
@@ -186,22 +186,69 @@ most for real-world usability.
 
 ## Telegram bot
 
+22 commands across four groups. The bot is not just an alert pipe — you can
+interrogate every module's live state and control sensitivity without a restart.
+
+**📊 Monitoring**
+
 | Command | Action |
 |---|---|
-| `/status` | Health, uptime, per-module event counts, classifier state |
-| `/scores` | Live manipulation scores, ranked |
-| `/check BTC` | Score an asset on demand with full evidence |
+| `/scores` | Risk board — every tracked asset ranked by manipulation score |
+| `/check <ASSET>` | Full report: score, module breakdown, evidence, key features |
+| `/explain <ASSET>` | Feature-by-feature breakdown with data-freshness per module |
+| `/history [ASSET]` | Recent alerts fired, with timestamps |
+
+**🔍 Per-module detail**
+
+| Command | Action |
+|---|---|
+| `/book <PAIR>` | Order book by venue — OBI, depth, spread, CVD, divergence |
+| `/whales [ASSET]` | Recent >$500k CEX transfers with direction and net pressure |
+| `/flows` | Net exchange inflow/outflow per asset, plus bridge activity |
+| `/social <TICKER>` | Sentiment, mention rate/acceleration, bot-farm verdict |
+
+**⚙️ Control**
+
+| Command | Action |
+|---|---|
 | `/watch`, `/unwatch` | Subscribe/unsubscribe this chat |
-| `/threshold 85` | Adjust the alert threshold at runtime |
-| `/mute 60` | Silence alerts for N minutes |
-| `/metrics` | Latency percentiles and throughput |
+| `/threshold <0-100>` | Adjust alert sensitivity live |
+| `/mute <min>`, `/unmute` | Silence alerts temporarily |
+| `/pause`, `/resume` | Halt delivery — **detection keeps running** |
+| `/test` | Fire a sample alert to verify sink wiring |
+
+**🩺 Diagnostics**
+
+| Command | Action |
+|---|---|
+| `/status` | Module health, bus throughput, classifier state, latency |
+| `/venues` | Feed connections, message counts, degraded streams |
+| `/config` | Every active threshold and coverage setting |
+| `/metrics` | Latency percentiles and counters |
+
+Example — `/check PEPE` during a live episode:
+
+```
+🟠 MANIPULATION ALERT — PEPE
+Score: 83.2/100  ████████░░   Severity: HIGH
+
+Signal breakdown
+  Social      ████░░░░  53.1
+  Order Flow  ██░░░░░░  30.0
+  On-Chain    ██░░░░░░  19.4
+
+Evidence
+  • order book 71% bid-heavy
+  • price/CVD divergence — markup without real buying
+  • DEX liquidity -49% in one block
+  • bot-farm pattern (confidence 53%)
+  • extreme bullish sentiment (+0.61)
+```
 
 Alerts are de-duplicated per asset with a cooldown, **but severity escalation always
 breaks through** — suppressing a MEDIUM→CRITICAL upgrade is worse than a duplicate.
 In one 80-second demo run this collapsed 339 raw threshold breaches into **9 delivered
 alerts**.
-
----
 
 ## Architecture notes
 
@@ -256,10 +303,10 @@ src/cadb/
 │   ├── social/        sentiment · botfarm · sources · monitor
 │   └── ml/            features · classifier · training · scorer
 ├── alerting/          formatter · router (dedup, escalation, rate limit)
-├── bot/               interactive Telegram command interface
+├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 138 tests
+tests/                 149 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -286,7 +333,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 138 tests, ~2 min
+pytest tests/ -v                                  # 149 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 

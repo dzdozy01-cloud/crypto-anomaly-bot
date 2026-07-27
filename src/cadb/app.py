@@ -16,6 +16,7 @@ import json
 import logging
 import signal
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,8 @@ class Application:
         self.router: AlertRouter | None = None
         self.bot: TelegramBot | None = None
         self.started_at = 0.0
+        self.alerts_paused = False
+        self.alert_history: deque[AnomalySignal] = deque(maxlen=200)
         self._shutdown = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
 
@@ -98,101 +101,22 @@ class Application:
 
     async def _on_signal(self, signal: AnomalySignal) -> None:
         """Route a high-scoring signal to webhooks and the interactive bot."""
+        self.alert_history.append(signal)
+        if self.alerts_paused:
+            log.debug("alerts paused; not dispatching %s", signal.asset_pair)
+            return
         if self.router:
             await self.router.dispatch(signal)
         if self.bot and self.bot.running:
             with contextlib.suppress(Exception):
                 await self.bot.broadcast_signal(signal)
 
-    # ---- bot commands ------------------------------------------------------
     def _register_bot_commands(self) -> None:
+        """Attach the full command surface (see :mod:`cadb.bot.commands`)."""
         assert self.bot is not None
+        from .bot.commands import register_commands
 
-        async def status_cmd(args: list[str], chat_id: int) -> str:
-            h = self.health()
-            uptime = h["uptime_s"]
-            lines = [
-                "<b>🛡 CADB Status</b>",
-                f"Uptime: <code>{uptime // 3600:.0f}h {(uptime % 3600) // 60:.0f}m</code>",
-                f"Bus: <code>{h['bus']['published']:,}</code> published, "
-                f"<code>{h['bus']['dropped']:,}</code> dropped",
-                "",
-                "<b>Modules</b>",
-            ]
-            for m in h["modules"]:
-                icon = "🟢" if m.get("healthy") else "🔴"
-                lines.append(
-                    f"{icon} <code>{m['module']:<9}</code> {m.get('events', 0):,} events"
-                )
-            clf = h.get("ml", {}).get("classifier", {})
-            if clf:
-                lines += [
-                    "",
-                    "<b>Classifier</b>",
-                    f"  trained: {clf.get('trained')} "
-                    f"({clf.get('training_size', 0):,} samples)",
-                    f"  scored: {clf.get('scored', 0):,}",
-                    f"  alerts: {h.get('ml', {}).get('alerts', 0)}",
-                ]
-            lat = METRICS.snapshot()["latency"].get("ml.cycle_ms")
-            if lat and lat["count"]:
-                lines.append(
-                    f"\n<i>Scoring p95: {lat['p95']:.1f}ms "
-                    f"(budget {self.settings.telemetry.latency_budget_ms:.0f}ms)</i>"
-                )
-            return "\n".join(lines)
-
-        async def scores_cmd(args: list[str], chat_id: int) -> str:
-            if not self.ml:
-                return "ML scorer not enabled."
-            top = self.ml.top_scores(15)
-            if not top:
-                return "No scores yet — still warming up."
-            from .alerting.formatter import SEVERITY_EMOJI
-
-            lines = ["<b>📈 Manipulation Scores</b>", ""]
-            for asset, score in top:
-                sev = (
-                    "critical" if score >= 90 else "high" if score >= 80
-                    else "medium" if score >= 60 else "low" if score >= 40 else "info"
-                )
-                bar = "█" * int(score / 10) + "░" * (10 - int(score / 10))
-                lines.append(
-                    f"{SEVERITY_EMOJI[sev]} <code>{asset:<8} {score:5.1f}</code> {bar}"
-                )
-            return "\n".join(lines)
-
-        async def check_cmd(args: list[str], chat_id: int) -> str:
-            if not args:
-                return "Usage: <code>/check BTC</code>"
-            if not self.ml:
-                return "ML scorer not enabled."
-            signal = self.ml.score_asset(args[0])
-            if signal is None:
-                return f"No data for <code>{args[0].upper()}</code> yet."
-            from .alerting.formatter import format_telegram
-
-            return format_telegram(signal)["text"]
-
-        async def threshold_cmd(args: list[str], chat_id: int) -> str:
-            if not args:
-                return f"Current threshold: <code>{self.settings.ml.alert_threshold:.0f}</code>"
-            try:
-                value = float(args[0])
-            except ValueError:
-                return "Usage: <code>/threshold 80</code>"
-            value = max(0.0, min(100.0, value))
-            self.settings.ml.alert_threshold = value
-            if self.ml:
-                self.ml.config.alert_threshold = value
-            if self.router:
-                self.router.config.min_score = value
-            return f"✅ Alert threshold set to <code>{value:.0f}</code>"
-
-        self.bot.register("status", status_cmd)
-        self.bot.register("scores", scores_cmd)
-        self.bot.register("check", check_cmd)
-        self.bot.register("threshold", threshold_cmd)
+        register_commands(self.bot, self)
 
     # ---- lifecycle ---------------------------------------------------------
     async def start(self) -> None:

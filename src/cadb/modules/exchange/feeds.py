@@ -387,9 +387,16 @@ class SimulatedFeed(ExchangeFeed):
         self.tick_interval = tick_interval
         self.episode_probability = episode_probability
         self.connected = True
-        self.state: dict[str, _SimSymbolState] = {
-            s: _SimSymbolState(price=self.SEED_PRICES.get(s, 100.0)) for s in symbols
-        }
+        # Order sizes are derived from price so every symbol carries a
+        # comparable ~$25k of notional per level. A fixed base size would give a
+        # micro-cap pair a fraction of a cent of depth and make its OBI, CVD and
+        # depth readouts meaningless.
+        self.state: dict[str, _SimSymbolState] = {}
+        for sym in symbols:
+            seed = self.SEED_PRICES.get(sym, 100.0)
+            self.state[sym] = _SimSymbolState(
+                price=seed, base_size=max(25_000.0 / seed, 1e-8)
+            )
         # Persistent per-venue basis of a few bps, as real venues exhibit.
         self.basis: dict[str, float] = {
             s: 1.0 + self.rng.gauss(0, 0.0004) for s in symbols

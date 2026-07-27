@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest_asyncio
+
 from cadb.alerting.formatter import format_discord, format_plain, format_telegram
 from cadb.alerting.router import AlertRouter, AlertSink
 from cadb.core.config import AlertConfig
@@ -238,3 +240,107 @@ class TestTelegramBot:
         bot.send = fake_send  # type: ignore[assignment]
         await bot.broadcast_signal(_signal())
         assert set(sent) == {"1", "2"}
+
+
+class TestBotCommands:
+    """The command surface must never crash, even with no data yet."""
+
+    @pytest_asyncio.fixture
+    async def wired(self):
+        from cadb.app import Application
+        from cadb.bot.commands import register_commands
+        from cadb.bot.telegram_bot import TelegramBot
+        from cadb.core.config import Settings
+
+        s = Settings()
+        s.exchange.simulate = s.onchain.simulate = s.social.simulate = True
+        s.exchange.exchanges = ["binance"]
+        s.exchange.symbols = ["BTC/USDT"]
+        s.social.tracked_tickers = ["BTC"]
+        s.social.use_finbert = False
+        s.ml.model_path = ""
+        s.alerts.dry_run = True
+        s.telemetry.log_level = "ERROR"
+        s.telemetry.state_file = ""
+
+        app = Application(s)
+        await app.setup()
+        bot = TelegramBot(token="")
+        app.bot = bot
+        register_commands(bot, app)
+        yield app, bot
+
+    async def test_every_command_registered(self, wired):
+        _, bot = wired
+        expected = {
+            "help", "start", "status", "scores", "check", "explain", "book",
+            "whales", "flows", "social", "venues", "history", "config",
+            "threshold", "pause", "resume", "mute", "unmute", "watch",
+            "unwatch", "metrics", "test",
+        }
+        assert expected.issubset(set(bot.commands))
+
+    async def test_commands_survive_empty_state(self, wired):
+        """Before any data arrives, commands must guide rather than explode."""
+        _, bot = wired
+        for name in ("status", "scores", "whales", "flows", "venues",
+                     "history", "config", "help", "metrics"):
+            out = await bot.commands[name]([], 1)
+            assert isinstance(out, str) and out.strip()
+
+    async def test_commands_requiring_args_explain_usage(self, wired):
+        _, bot = wired
+        for name in ("check", "explain", "book", "social"):
+            out = await bot.commands[name]([], 1)
+            assert "usage" in out.lower() or "tracking" in out.lower()
+
+    async def test_unknown_asset_is_handled(self, wired):
+        _, bot = wired
+        out = await bot.commands["check"](["NOSUCHTOKEN"], 1)
+        assert "no data" in out.lower()
+
+    async def test_threshold_updates_all_consumers(self, wired):
+        app, bot = wired
+        await bot.commands["threshold"](["65"], 1)
+        assert app.settings.ml.alert_threshold == 65.0
+        assert app.ml.config.alert_threshold == 65.0
+        assert app.router.config.min_score == 65.0
+
+    async def test_threshold_rejects_garbage(self, wired):
+        _, bot = wired
+        assert "usage" in (await bot.commands["threshold"](["abc"], 1)).lower()
+
+    async def test_threshold_clamped_to_range(self, wired):
+        app, bot = wired
+        await bot.commands["threshold"](["500"], 1)
+        assert app.settings.ml.alert_threshold == 100.0
+
+    async def test_pause_blocks_dispatch(self, wired):
+        app, bot = wired
+        await bot.commands["pause"]([], 1)
+        assert app.alerts_paused
+        before = app.router.dispatched
+        await app._on_signal(_signal(95.0))
+        assert app.router.dispatched == before, "paused router must not dispatch"
+        await bot.commands["resume"]([], 1)
+        assert not app.alerts_paused
+
+    async def test_history_records_even_when_paused(self, wired):
+        """Detection must keep working while delivery is muted."""
+        app, bot = wired
+        await bot.commands["pause"]([], 1)
+        await app._on_signal(_signal(91.0, "PEPE"))
+        assert any(s.asset_pair == "PEPE" for s in app.alert_history)
+        out = await bot.commands["history"]([], 1)
+        assert "PEPE" in out
+
+    async def test_test_command_reaches_sinks(self, wired):
+        app, bot = wired
+        out = await bot.commands["test"]([], 1)
+        assert "console" in out
+
+    async def test_output_is_telegram_length_safe(self, wired):
+        """A single message must stay under Telegram's 4096-char cap."""
+        _, bot = wired
+        for name in ("help", "config", "status"):
+            assert len(await bot.commands[name]([], 1)) < 4096

@@ -65,6 +65,7 @@ class TelegramBot:
         self.subscribers: set[str] = {self.default_chat_id} if self.default_chat_id else set()
         self.muted_until: float = 0.0
         self.commands: dict[str, CommandHandler] = {}
+        self.descriptions: dict[str, str] = {}
         self.messages_sent = 0
         self.commands_handled = 0
         self._register_builtin()
@@ -123,8 +124,10 @@ class TelegramBot:
             return fn
         return deco
 
-    def register(self, name: str, handler: CommandHandler) -> None:
+    def register(self, name: str, handler: CommandHandler, description: str = "") -> None:
         self.commands[name] = handler
+        if description:
+            self.descriptions[name] = description
 
     def _register_builtin(self) -> None:
         async def help_cmd(args: list[str], chat_id: int) -> str:
@@ -177,12 +180,12 @@ class TelegramBot:
                     lines.append(f"  <code>{k:<28}</code> {v:,.0f}")
             return "\n".join(lines)
 
-        self.register("help", help_cmd)
-        self.register("start", help_cmd)
-        self.register("watch", watch_cmd)
-        self.register("unwatch", unwatch_cmd)
-        self.register("mute", mute_cmd)
-        self.register("metrics", metrics_cmd)
+        self.register("help", help_cmd, "Show all commands")
+        self.register("start", help_cmd, "Show all commands")
+        self.register("watch", watch_cmd, "Subscribe this chat to alerts")
+        self.register("unwatch", unwatch_cmd, "Unsubscribe from alerts")
+        self.register("mute", mute_cmd, "Silence alerts for N minutes")
+        self.register("metrics", metrics_cmd, "Latency and throughput")
 
     # ---- polling ----------------------------------------------------------
     async def _handle_update(self, update: dict[str, Any]) -> None:
@@ -244,26 +247,15 @@ class TelegramBot:
         with contextlib.suppress(Exception):
             me = await self._api("getMe")
             log.info("telegram bot connected: @%s", me["result"].get("username"))
-        with contextlib.suppress(Exception):
-            await self._api(
-                "setMyCommands",
-                {
-                    "commands": [
-                        {"command": c, "description": d}
-                        for c, d in [
-                            ("status", "System health and module state"),
-                            ("scores", "Current manipulation scores"),
-                            ("check", "Score an asset on demand"),
-                            ("watch", "Subscribe to alerts"),
-                            ("unwatch", "Unsubscribe from alerts"),
-                            ("threshold", "Set alert threshold"),
-                            ("mute", "Silence alerts temporarily"),
-                            ("metrics", "Latency and throughput"),
-                            ("help", "Show help"),
-                        ]
-                    ]
-                },
-            )
+        # Telegram shows at most 100 commands; ours is well under that.
+        menu = [
+            {"command": name, "description": desc[:256]}
+            for name, desc in sorted(self.descriptions.items())
+            if name != "start"
+        ]
+        if menu:
+            with contextlib.suppress(Exception):
+                await self._api("setMyCommands", {"commands": menu})
         self._task = asyncio.create_task(self._poll_loop(), name="telegram-bot")
 
     async def stop(self) -> None:
