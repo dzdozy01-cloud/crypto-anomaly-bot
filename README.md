@@ -352,8 +352,11 @@ at a literal placeholder string.
 ## Configuration
 
 Layered: **defaults → `config.yaml` → environment**. Secrets never live in the YAML;
-use `${VAR}` or `${VAR:-default}` references. See `config.yaml` (documented inline)
-and `.env.example`.
+use `${VAR}` or `${VAR:-default}` references.
+
+**Only two variables are required** — `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+Everything else has a working default or degrades gracefully; the system starts
+with a completely empty environment. Full reference: **[docs/SETUP.md](docs/SETUP.md)**.
 
 Key knobs: `ml.alert_threshold` (default 80), `ml.ml_blend` (0 = pure rules,
 1 = pure forest), `ml.weights`, `exchange.volume_z_threshold` (3.0),

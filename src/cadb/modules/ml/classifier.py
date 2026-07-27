@@ -444,7 +444,7 @@ class ManipulationClassifier:
 
     # ---- persistence -----------------------------------------------------
     def save(self, path: str | Path) -> bool:
-        if not self.is_trained:
+        if not self.is_trained or not str(path).strip():
             return False
         try:
             import joblib
@@ -470,8 +470,12 @@ class ManipulationClassifier:
         return True
 
     def load(self, path: str | Path) -> bool:
+        # An empty/blank path means "no persistence configured" — Path("")
+        # resolves to "." and would otherwise raise a confusing IsADirectoryError.
+        if not str(path).strip():
+            return False
         p = Path(path)
-        if not p.exists():
+        if not p.exists() or not p.is_file():
             return False
         try:
             import joblib
