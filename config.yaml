@@ -1,0 +1,115 @@
+# CADB — Crypto Anomaly Detection Bot
+#
+# Secrets are never stored here. `${VAR}` and `${VAR:-default}` are expanded
+# from the environment at load time. Validate with:  cadb validate -c config.yaml
+
+# ---------------------------------------------------------------- ingestion bus
+bus:
+  kind: memory                      # memory | redis  (redis = multi-process)
+  url: ${REDIS_URL:-redis://localhost:6379/0}
+  queue_size: 10000                 # per-subscriber buffer, drop-oldest when full
+
+# ------------------------------------------- Module 1: Exchange Anomaly Engine
+exchange:
+  enabled: true
+  exchanges: [binance, bybit, mexc]
+  symbols:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+    - PEPE/USDT
+    - DOGE/USDT
+  orderbook_depth: 50               # L2 levels requested from the venue
+  obi_depth_levels: 20              # levels aggregated into the OBI
+  obi_threshold: 0.35               # |OBI| beyond this is a lopsided book
+  volume_window_s: 300              # rolling 5-minute volume window
+  volume_bucket_s: 5                # bucket granularity for the z-score
+  volume_z_threshold: 3.0           # fire when V > mu + 3*sigma
+  cvd_window_s: 300
+  cvd_z_threshold: 2.5
+  use_ccxt_pro: true                # false -> native websocket clients
+  simulate: false                   # true -> synthetic feed, no network
+
+# -------------------------------------------- Module 2: On-Chain Whale Tracker
+onchain:
+  enabled: true
+  evm_rpc:                          # comma-separate for automatic failover
+    ethereum: ${ETH_RPC_URL:-https://eth.llamarpc.com}
+    bsc: ${BSC_RPC_URL:-https://binance.llamarpc.com}
+  solana_rpc: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+  poll_interval_s: 3.0
+  whale_threshold_usd: 500000       # flag CEX flows above $500k
+  liquidity_drop_pct: 30            # flag >30% single-block LP drops
+  bridge_threshold_usd: 1000000     # flag large stablecoin bridge transfers
+  simulate: false
+
+  # Extra tokens to track (a curated mainnet set is built in).
+  tracked_tokens: []
+  # - { chain: ethereum, symbol: MYTOKEN, address: "0x...", decimals: 18, price_usd: 1.5 }
+
+  # Extra CEX hot wallets:  { "0xaddress": "label" }
+  cex_wallets: {}
+  # Extra bridge contracts:  { "0xaddress": "label" }
+  bridge_contracts: {}
+  # Extra UniswapV2-style pools to watch for reserve drains.
+  dex_pools: []
+  # - { chain: ethereum, name: "TOKEN/WETH", address: "0x...", token0: TOKEN, token1: WETH }
+
+# ------------------------------------------- Module 3: Social Sentiment Monitor
+social:
+  enabled: true
+  x_bearer_token: ${X_BEARER_TOKEN:-}
+  telegram_api_id: ${TELEGRAM_API_ID:-}
+  telegram_api_hash: ${TELEGRAM_API_HASH:-}
+  telegram_channels: []             # e.g. ["@channelname", -1001234567890]
+  tracked_tickers: [BTC, ETH, SOL, PEPE, DOGE]
+  finbert_model: ProsusAI/finbert
+  use_finbert: true                 # false (or missing deps) -> lexicon backend
+  sentiment_batch_size: 16
+  mention_window_s: 300
+  mention_z_threshold: 3.0
+  bot_farm_min_posts: 12            # minimum sample before a farm verdict
+  bot_account_age_days: 30          # "young account" cutoff
+  bot_age_variance_threshold: 0.35  # age CV below this == batch-registered
+  poll_interval_s: 15.0
+  simulate: false
+
+# ------------------------------------ Module 4: ML Manipulation Classifier
+ml:
+  enabled: true
+  model_path: models/isolation_forest.joblib
+  contamination: 0.02               # expected anomaly rate in training data
+  n_estimators: 200
+  max_samples: auto
+  random_state: 42
+  min_training_samples: 200
+  retrain_interval_s: 3600          # online retraining cadence
+  online_training: true
+  feature_ttl_s: 600                # how long a module's feature stays fresh
+  score_interval_ms: 250            # scoring cadence per asset
+  alert_threshold: 80               # composite score > 80 fires an alert
+  ml_blend: 0.5                     # 0 = pure rules, 1 = pure IsolationForest
+  weights:                          # module weighting in the composite score
+    exchange: 0.40
+    onchain: 0.35
+    social: 0.25
+
+# ------------------------------------------------------------------- alerting
+alerts:
+  telegram_bot_token: ${TELEGRAM_BOT_TOKEN:-}
+  telegram_chat_id: ${TELEGRAM_CHAT_ID:-}
+  discord_webhook_url: ${DISCORD_WEBHOOK_URL:-}
+  generic_webhooks: []
+  min_score: 80                     # kept in sync with ml.alert_threshold
+  cooldown_s: 300                   # per asset+severity de-duplication
+  max_alerts_per_min: 20            # global outbound ceiling
+  dry_run: false                    # true -> log instead of sending
+
+# ---------------------------------------------------------------- telemetry
+telemetry:
+  log_level: ${CADB_LOG_LEVEL:-INFO}
+  json_logs: false                  # true for structured/ingestable logs
+  metrics_port: 0                   # >0 exposes /metrics and /health
+  latency_budget_ms: 200            # warn when p95 exceeds this
+  health_interval_s: 60
+  state_file: state/runtime.json

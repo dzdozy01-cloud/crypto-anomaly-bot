@@ -1,0 +1,332 @@
+"""Core primitives: schema, bus, statistics, resilience, config."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from pydantic import ValidationError
+
+from cadb.core.bus import InProcessBus
+from cadb.core.config import Settings, load_settings
+from cadb.core.resilience import BackoffPolicy, CircuitBreaker, CircuitState, RateLimiter
+from cadb.core.schema import MarketEvent, MetricType, Severity, SourceType, now_ms
+from cadb.core.stats import (
+    CusumDetector,
+    DynamicZScore,
+    EWMAZScore,
+    RobustZScore,
+    RollingWindow,
+)
+
+
+# ---------------------------------------------------------------- schema
+class TestSchema:
+    def test_event_normalises_symbol_and_venue(self):
+        e = MarketEvent(
+            source_type=SourceType.EXCHANGE, venue="  BINANCE ", asset_pair=" btc/usdt ",
+            metric_type=MetricType.VOLUME, raw_value=1.0,
+        )
+        assert e.venue == "binance"
+        assert e.asset_pair == "BTC/USDT"
+        assert e.base_asset == "BTC"
+
+    def test_channel_routing(self):
+        e = MarketEvent(
+            source_type=SourceType.ONCHAIN, venue="ethereum", asset_pair="USDT",
+            metric_type=MetricType.WALLET_TRANSFER, raw_value=1.0,
+        )
+        assert e.channel == "cadb.onchain.wallet_transfer"
+
+    def test_rejects_non_finite(self):
+        for bad in (float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                MarketEvent(
+                    source_type=SourceType.EXCHANGE, venue="x", asset_pair="A/B",
+                    metric_type=MetricType.VOLUME, raw_value=bad,
+                )
+
+    def test_wire_roundtrip_preserves_fields(self):
+        e = MarketEvent(
+            source_type=SourceType.SOCIAL, venue="aggregate", asset_pair="PEPE",
+            metric_type=MetricType.SOCIAL_MENTIONS, raw_value=42.5,
+            normalized_z_score=3.2, meta={"acceleration": 1.5},
+        )
+        back = MarketEvent.from_wire(e.to_wire())
+        assert back.raw_value == e.raw_value
+        assert back.normalized_z_score == e.normalized_z_score
+        assert back.metric_type is e.metric_type
+        assert back.meta["acceleration"] == 1.5
+
+    def test_severity_ordering(self):
+        assert Severity.CRITICAL.rank > Severity.HIGH.rank > Severity.MEDIUM.rank
+        assert Severity.INFO.rank == 0
+
+    def test_immutability(self):
+        e = MarketEvent(
+            source_type=SourceType.EXCHANGE, venue="v", asset_pair="A/B",
+            metric_type=MetricType.VOLUME, raw_value=1.0,
+        )
+        with pytest.raises(ValidationError):
+            e.raw_value = 2.0  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------- bus
+class TestBus:
+    def _event(self, metric=MetricType.VOLUME, value=1.0, source=SourceType.EXCHANGE):
+        return MarketEvent(
+            source_type=source, venue="binance", asset_pair="BTC/USDT",
+            metric_type=metric, raw_value=value,
+        )
+
+    async def test_publish_and_stream(self):
+        bus = InProcessBus()
+        await bus.start()
+        received: list[MarketEvent] = []
+
+        async def handler(e: MarketEvent) -> None:
+            received.append(e)
+
+        bus.add_handler(handler, "cadb.exchange.*", name="t")
+        await asyncio.sleep(0)
+        for i in range(5):
+            await bus.publish(self._event(value=float(i)))
+        await asyncio.sleep(0.05)
+        assert len(received) == 5
+        assert bus.stats.published == 5
+        await bus.close()
+
+    async def test_pattern_filtering(self):
+        bus = InProcessBus()
+        await bus.start()
+        ex: list[MarketEvent] = []
+        oc: list[MarketEvent] = []
+
+        bus.add_handler(lambda e: _append(ex, e), "cadb.exchange.*", name="ex")
+        bus.add_handler(lambda e: _append(oc, e), "cadb.onchain.*", name="oc")
+        await asyncio.sleep(0)
+
+        await bus.publish(self._event())
+        await bus.publish(
+            MarketEvent(
+                source_type=SourceType.ONCHAIN, venue="ethereum", asset_pair="USDT",
+                metric_type=MetricType.WALLET_TRANSFER, raw_value=1e6,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert len(ex) == 1 and len(oc) == 1
+        await bus.close()
+
+    async def test_backpressure_drops_oldest_not_newest(self):
+        """A lagging subscriber must lose stale ticks, never the freshest."""
+        bus = InProcessBus(queue_size=5)
+        await bus.start()
+        sub = bus.subscribe("cadb.*", name="slow")
+        for i in range(20):
+            await bus.publish(self._event(value=float(i)))
+        drained = []
+        while not sub.queue.empty():
+            drained.append(sub.queue.get_nowait().raw_value)
+        assert bus.stats.dropped > 0
+        assert drained[-1] == 19.0, "freshest tick must survive"
+        await bus.close()
+
+    async def test_handler_exception_does_not_kill_bus(self):
+        bus = InProcessBus()
+        await bus.start()
+        good: list[MarketEvent] = []
+
+        async def bad(_e):
+            raise RuntimeError("boom")
+
+        bus.add_handler(bad, "cadb.*", name="bad")
+        bus.add_handler(lambda e: _append(good, e), "cadb.*", name="good")
+        await asyncio.sleep(0)
+        await bus.publish(self._event())
+        await asyncio.sleep(0.05)
+        assert len(good) == 1
+        assert bus.stats.errors >= 1
+        await bus.close()
+
+
+async def _append(target: list, event) -> None:
+    target.append(event)
+
+
+# ----------------------------------------------------------------- stats
+class TestStats:
+    def test_rolling_window_evicts_by_time(self):
+        w = RollingWindow(window_ms=1000)
+        t = now_ms()
+        for i in range(10):
+            w.add(t + i * 100, 1.0)
+        assert len(w) == 10
+        w.add(t + 5000, 1.0)
+        assert len(w) == 1
+
+    def test_rolling_window_moments(self):
+        w = RollingWindow(window_ms=10_000)
+        t = now_ms()
+        for i, v in enumerate([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]):
+            w.add(t + i, v)
+        assert w.mean == pytest.approx(5.0)
+        assert w.std == pytest.approx(2.138, abs=0.01)  # sample std
+
+    def test_zscore_none_until_warmup(self):
+        w = RollingWindow(window_ms=60_000)
+        t = now_ms()
+        for i in range(5):
+            w.add(t + i, 1.0)
+        assert w.zscore(10.0, min_samples=20) is None
+
+    def test_ewma_detects_spike(self):
+        e = EWMAZScore(half_life_s=30, warmup=10)
+        t = now_ms()
+        for i in range(60):
+            e.update(10.0 + (i % 3) * 0.1, t + i * 1000)
+        z = e.score(25.0)
+        assert z is not None and z > 3.0
+
+    def test_robust_resists_outlier_poisoning(self):
+        """The key property: one huge print must not blind the next detection."""
+        robust = RobustZScore(window=200, warmup=20)
+        classic = EWMAZScore(half_life_s=60, warmup=20)
+        t = now_ms()
+        for i in range(100):
+            robust.update(10.0)
+            classic.update(10.0, t + i * 1000)
+        # A single 100x print.
+        robust.update(1000.0)
+        classic.update(1000.0, t + 100_000)
+        for i in range(5):
+            robust.update(10.0)
+            classic.update(10.0, t + (101 + i) * 1000)
+        rz = robust.score(30.0)
+        cz = classic.score(30.0)
+        assert rz is not None and cz is not None
+        assert rz > cz, "MAD estimator should stay sensitive after an outlier"
+
+    def test_dynamic_zscore_threshold_adapts_upward(self):
+        d = DynamicZScore(base_threshold=3.0, warmup=10, adaptive=True)
+        t = now_ms()
+        for i in range(80):
+            d.update(10.0, t + i * 1000)
+        assert d.threshold >= 3.0
+
+    def test_dynamic_zscore_flags_spike(self):
+        d = DynamicZScore(half_life_s=60, warmup=20, base_threshold=3.0)
+        t = now_ms()
+        for i in range(120):
+            d.update(100.0 + (i % 5), t + i * 1000)
+        z = d.update(400.0, t + 120_000)
+        assert z is not None and z > 3.0
+        assert d.is_anomalous(z)
+
+    def test_cusum_detects_level_shift(self):
+        c = CusumDetector(drift=0.5, threshold=5.0)
+        assert all(c.update(0.1) == 0 for _ in range(10))
+        shifts = [c.update(2.0) for _ in range(10)]
+        assert 1 in shifts
+
+
+# ------------------------------------------------------------ resilience
+class TestResilience:
+    def test_backoff_grows_and_caps(self):
+        p = BackoffPolicy(initial=1.0, maximum=10.0, multiplier=2.0, jitter=False)
+        delays = [p.next_delay() for _ in range(8)]
+        assert delays[0] == 1.0
+        assert all(d <= 10.0 for d in delays)
+        assert delays[-1] == 10.0
+
+    def test_backoff_jitter_spreads_reconnects(self):
+        p = BackoffPolicy(initial=1.0, maximum=30.0, jitter=True)
+        samples = set()
+        for _ in range(20):
+            p.reset()
+            samples.add(round(p.next_delay(), 4))
+        assert len(samples) > 5, "jitter must decorrelate reconnect timing"
+
+    def test_backoff_reset(self):
+        p = BackoffPolicy(initial=1.0, maximum=60.0, jitter=False)
+        for _ in range(5):
+            p.next_delay()
+        p.reset()
+        assert p.next_delay() == 1.0
+
+    async def test_circuit_breaker_opens_then_recovers(self):
+        cb = CircuitBreaker(name="t", failure_threshold=3, recovery_timeout=0.1,
+                            half_open_successes=1)
+
+        async def fail():
+            raise RuntimeError("nope")
+
+        for _ in range(3):
+            with pytest.raises(RuntimeError):
+                await cb.call(fail)
+        assert cb.state is CircuitState.OPEN
+
+        from cadb.core.resilience import CircuitOpenError
+
+        with pytest.raises(CircuitOpenError):
+            await cb.call(fail)
+
+        await asyncio.sleep(0.15)
+
+        async def ok():
+            return 42
+
+        assert await cb.call(ok) == 42
+        assert cb.state is CircuitState.CLOSED
+
+    async def test_rate_limiter_enforces_rate(self):
+        limiter = RateLimiter(rate_per_sec=50, burst=1)
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        for _ in range(5):
+            await limiter.acquire()
+        assert loop.time() - start >= 0.05
+
+
+# ---------------------------------------------------------------- config
+class TestConfig:
+    def test_defaults_are_valid(self):
+        s = Settings()
+        assert "binance" in s.exchange.exchanges
+        assert s.ml.alert_threshold == 80.0
+        assert s.onchain.whale_threshold_usd == 500_000.0
+        assert s.onchain.liquidity_drop_pct == 30.0
+        assert s.exchange.volume_z_threshold == 3.0
+
+    def test_yaml_and_env_expansion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEST_TOKEN_XYZ", "secret-value")
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "alerts:\n"
+            "  telegram_bot_token: ${TEST_TOKEN_XYZ}\n"
+            "  min_score: 75\n"
+            "exchange:\n"
+            "  symbols: [btc/usdt, eth/usdt]\n"
+        )
+        s = load_settings(cfg)
+        assert s.alerts.telegram_bot_token == "secret-value"
+        assert s.alerts.min_score == 75
+        assert s.exchange.symbols == ["BTC/USDT", "ETH/USDT"]
+
+    def test_env_override_takes_precedence(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("ml:\n  alert_threshold: 50\n")
+        monkeypatch.setenv("CADB_ALERT_THRESHOLD", "95")
+        assert load_settings(cfg).ml.alert_threshold == 95.0
+
+    def test_env_default_syntax(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("UNSET_VAR_ABC", raising=False)
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("onchain:\n  solana_rpc: ${UNSET_VAR_ABC:-https://fallback.rpc}\n")
+        assert load_settings(cfg).onchain.solana_rpc == "https://fallback.rpc"
+
+    def test_tracked_assets_union(self):
+        s = Settings()
+        s.exchange.symbols = ["BTC/USDT", "ETH/USDT"]
+        s.social.tracked_tickers = ["SOL", "btc"]
+        assets = s.tracked_assets()
+        assert {"BTC", "ETH", "SOL"}.issubset(set(assets))

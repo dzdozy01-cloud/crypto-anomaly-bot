@@ -1,0 +1,45 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  cadb:
+    build:
+      context: .
+      args:
+        EXTRAS: ${CADB_EXTRAS:-exchange,onchain,redis,speed}
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      CADB_REDIS_URL: redis://redis:6379/0
+      CADB_LOG_LEVEL: ${CADB_LOG_LEVEL:-INFO}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - model-data:/app/models
+      - state-data:/app/state
+    ports:
+      - "127.0.0.1:9090:9090"   # metrics, when telemetry.metrics_port=9090
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+volumes:
+  redis-data:
+  model-data:
+  state-data:

@@ -1,0 +1,70 @@
+# --- secrets (never commit) ---
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+credentials.json
+
+# --- runtime artefacts ---
+state/
+models/*.joblib
+logs/
+*.log
+events*.jsonl
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- testing / typing ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.hypothesis/
+.tox/
+.nox/
+
+# --- environments ---
+.venv/
+venv/
+ENV/
+env/
+
+# --- editors / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- ml / data ---
+*.pkl
+*.h5
+*.onnx
+data/raw/
+data/cache/
+.cache/
