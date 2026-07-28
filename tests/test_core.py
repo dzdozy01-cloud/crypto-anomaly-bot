@@ -677,3 +677,46 @@ class TestDeployHealthCheck:
         ).read_text()
         assert "cid()" in wf, "CI deploy needs the same container resolution"
         assert 'docker inspect --format=\'{{.State.Status}}\' cadb ' not in wf
+
+
+class TestDeployScriptsAreExecutable:
+    """Shell scripts must ship with the executable bit set in git.
+
+    Regression: `./deploy/update.sh` failed with "Permission denied" on a fresh
+    clone. The scripts were chmod +x locally when first written, but later edits
+    rewrote them via Python (which recreates the file at 0644), and the mode was
+    never committed. Git tracks the executable bit, so the fix must live in the
+    index — a local chmod does not help anyone who clones.
+    """
+
+    def test_scripts_have_exec_bit_in_git(self):
+        import subprocess
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        out = subprocess.run(
+            ["git", "ls-files", "-s", "deploy/"],
+            cwd=repo, capture_output=True, text=True, check=False,
+        ).stdout
+        if not out.strip():
+            import pytest
+
+            pytest.skip("not a git checkout")
+
+        for line in out.strip().splitlines():
+            mode, _, rest = line.partition(" ")
+            path = rest.split("\t")[-1]
+            if path.endswith(".sh"):
+                assert mode == "100755", (
+                    f"{path} is mode {mode}; run "
+                    f"`git update-index --chmod=+x {path}`"
+                )
+
+    def test_scripts_have_shebang(self):
+        from pathlib import Path
+
+        deploy = Path(__file__).resolve().parent.parent / "deploy"
+        for script in deploy.glob("*.sh"):
+            first = script.read_text().splitlines()[0]
+            assert first.startswith("#!"), f"{script.name} lacks a shebang"
+            assert "bash" in first, f"{script.name} should specify bash"
