@@ -246,11 +246,46 @@ class RuleEngine:
             # pattern the wash rule just detected.
             getattr(self, "_last_wash_signature", 0.0),
         )
+        # The discount exists to suppress *news-driven* volume, which looks like
+        # a pump but lacks artificial markers. It must not suppress violent
+        # order-flow events: a flash crash or capitulation dump has no bot farm
+        # and no LP drain by nature, yet it is precisely what a surveillance
+        # system exists to report. Scoring one of those 37/100 because nobody
+        # was shilling it on Twitter is backwards.
+        #
+        # `structural_stress` measures how extreme the microstructure itself is.
+        # When the book and tape are this dislocated, the event is self-evident
+        # and needs no external corroboration.
+        structural_stress = max(
+            clamp((abs(f["cvd_z"]) - 3.0) / 4.0, 0.0, 1.0),
+            clamp((abs(f["obi_z"]) - 3.0) / 4.0, 0.0, 1.0),
+            clamp((f["obi_abs"] - 0.6) / 0.35, 0.0, 1.0),
+            clamp((f["volume_z"] - 5.0) / 5.0, 0.0, 1.0),
+        )
         loud = f["volume_z"] > 2.0 or f["mention_z"] > 2.0
         organic_cutoff = 0.45
         if loud and artificial < organic_cutoff:
-            base *= 0.40 + 0.60 * (artificial / organic_cutoff)
-            reasons.append("organic-activity profile — no artificial-flow markers")
+            damping = 0.40 + 0.60 * (artificial / organic_cutoff)
+            # Fade the discount out as structural stress rises; at full stress
+            # the score passes through untouched.
+            damping += (1.0 - damping) * structural_stress
+            base *= damping
+            if damping < 0.9:
+                reasons.append("organic-activity profile — no artificial-flow markers")
+
+        # --- Order-flow shock: a self-evident violent move ---
+        # Volume spike + collapsed book depth + one-sided aggression is a
+        # dump/squeeze in progress. It requires no cross-module corroboration
+        # because all three legs are independent measurements of the same event.
+        if f["volume_z"] > 3.0 and f["obi_abs"] > 0.5 and abs(f["cvd_z"]) > 3.0:
+            direction = "SELL-OFF" if f["cvd_z"] < 0 else "BUY PANIC"
+            severity = min(
+                (f["volume_z"] / 3.0) * (f["obi_abs"] / 0.5) * (abs(f["cvd_z"]) / 3.0),
+                8.0,
+            )
+            base = max(base, clamp(62.0 + severity * 5.0, 0.0, 100.0))
+            reasons.insert(0, f"⚑ {direction}: volume {f['volume_z']:.1f}σ, book "
+                              f"{f['obi_abs']:.0%} one-sided, CVD {f['cvd_z']:+.1f}σ")
 
         return clamp(base, 0, 100), contributions, reasons
 
@@ -364,6 +399,21 @@ class ManipulationClassifier:
         return clamp((p50 - raw) / span * 100.0, 0.0, 100.0)
 
     @staticmethod
+    def _internally_corroborated(fv: FeatureVector) -> bool:
+        """True when one module's own metrics independently agree.
+
+        Volume, order-book imbalance and CVD are separate measurements. When all
+        three are extreme and consistent, the event is self-evident and needs no
+        cross-module confirmation.
+        """
+        f = fv.as_dict()
+        return (
+            f["volume_z"] > 3.0
+            and f["obi_abs"] > 0.5
+            and abs(f["cvd_z"]) > 3.0
+        )
+
+    @staticmethod
     def _severity(score: float) -> Severity:
         if score >= 90:
             return Severity.CRITICAL
@@ -404,8 +454,15 @@ class ManipulationClassifier:
             if ml_score >= 70 and rule_score < 40:
                 reasons.append(f"ML flags unusual multi-feature state ({ml_score:.0f}/100)")
 
-        # Confidence damping: a single-source signal should rarely alert alone.
-        if fv.coverage <= 0.34:
+        # Confidence damping: a single-source signal should rarely alert alone,
+        # because most one-module patterns are ambiguous without corroboration.
+        #
+        # The exception is a signal that is *internally* corroborated. A violent
+        # order-flow event is measured three independent ways — traded volume,
+        # book depth and aggressor delta — so it is not really "one source", and
+        # penalising it for the on-chain and social modules being disabled would
+        # mean a flash crash never alerts on an exchange-only deployment.
+        if fv.coverage <= 0.34 and not self._internally_corroborated(fv):
             composite *= 0.82
 
         composite = clamp(composite, 0.0, 100.0)

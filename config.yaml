@@ -12,7 +12,9 @@ bus:
 # ------------------------------------------- Module 1: Exchange Anomaly Engine
 exchange:
   enabled: true
-  exchanges: [binance, bybit, mexc]
+  # ccxt.pro ids. Note: 'gate' (not gateio), 'coinbase' (Advanced Trade).
+  # Robinhood has no public market-data WebSocket and cannot be supported.
+  exchanges: [binance, bybit, mexc, gate, kucoin, coinbase]
   symbols:
     - BTC/USDT
     - ETH/USDT

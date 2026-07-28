@@ -711,3 +711,30 @@ class TestSymbolDiscovery:
             "C/USDT": {"quoteVolume": 5e5},
         }
         self._disco().evaluate(t)  # must not raise
+
+
+class TestVenueSupport:
+    def test_requested_venues_exist_in_ccxt_pro(self):
+        ccxtpro = pytest.importorskip("ccxt.pro")
+        for venue in ("binance", "bybit", "mexc", "gate", "kucoin", "coinbase"):
+            assert hasattr(ccxtpro, venue), f"{venue} missing from ccxt.pro"
+
+    def test_unsupported_venue_raises_not_simulates(self):
+        """Silently faking a live venue would fabricate alerts."""
+        from cadb.modules.exchange.feeds import build_feed
+
+        with pytest.raises(ValueError, match="no live feed backend"):
+            build_feed("robinhood", ["BTC/USDT"], simulate=False, prefer_ccxt=True)
+
+    def test_explicit_simulate_still_allowed(self):
+        from cadb.modules.exchange.feeds import SimulatedFeed, build_feed
+
+        feed = build_feed("robinhood", ["BTC/USDT"], simulate=True)
+        assert isinstance(feed, SimulatedFeed)
+
+    def test_default_config_venues_are_supported(self):
+        ccxtpro = pytest.importorskip("ccxt.pro")
+        from cadb.core.config import Settings
+
+        for venue in Settings().exchange.exchanges:
+            assert hasattr(ccxtpro, venue), f"default venue {venue} unsupported"

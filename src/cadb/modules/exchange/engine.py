@@ -66,13 +66,18 @@ class ExchangeEngine(Module):
     # ---- lifecycle -----------------------------------------------------
     async def run(self) -> None:
         for venue in self.config.exchanges:
-            feed = build_feed(
-                venue=venue,
-                symbols=self.config.symbols,
-                depth=self.config.orderbook_depth,
-                simulate=self.config.simulate,
-                prefer_ccxt=self.config.use_ccxt_pro,
-            )
+            try:
+                feed = build_feed(
+                    venue=venue,
+                    symbols=self.config.symbols,
+                    depth=self.config.orderbook_depth,
+                    simulate=self.config.simulate,
+                    prefer_ccxt=self.config.use_ccxt_pro,
+                )
+            except ValueError as exc:
+                # One unsupported venue must not take down the others.
+                self.log.error("skipping venue %s: %s", venue, exc)
+                continue
             self.feeds[venue] = feed
             self.watched[venue] = set()
             for symbol in self.config.symbols:

@@ -102,7 +102,9 @@ class BusConfig(BaseModel):
 
 class ExchangeConfig(BaseModel):
     enabled: bool = True
-    exchanges: list[str] = Field(default_factory=lambda: ["binance", "bybit", "mexc"])
+    exchanges: list[str] = Field(
+        default_factory=lambda: ["binance", "bybit", "mexc", "gate", "kucoin", "coinbase"]
+    )
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
     orderbook_depth: int = 50
     volume_window_s: int = 300          # 5-minute rolling volume window

@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 220 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 232 tests passing.
 
 ---
 
@@ -87,8 +87,24 @@ geo-blocking: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 ## What each module detects
 
 ### Module 1 — Exchange Anomaly Engine
-L2 order books and raw trades over WebSocket (Binance, Bybit, MEXC) via CCXT Pro,
-with hand-rolled native WS clients as a fallback.
+L2 order books and raw trades over WebSocket via CCXT Pro across **Binance,
+Bybit, MEXC, Gate.io, KuCoin and Coinbase**, with hand-rolled native WS clients
+as a fallback. Any ccxt.pro exchange id works; an unsupported venue is rejected
+loudly rather than silently simulated.
+
+**Sell-off / buy-panic detection.** A violent move is measured three independent
+ways — traded volume, book depth and aggressor delta — so it alerts on exchange
+data alone, without needing on-chain or social corroboration:
+
+| Leg | Signal |
+|---|---|
+| Volume Z-Score | `V > μ + 3σ`, direction-agnostic |
+| Cumulative Volume Delta | market sells hitting limit bids drive CVD sharply negative |
+| Order Book Imbalance | cleared bid depth pushes OBI toward −1.0 |
+
+When all three fire together the event is self-evident, so the usual
+single-source damping is bypassed and the alert names the direction
+(`⚑ SELL-OFF: volume 9.0σ, book 88% one-sided, CVD −9.0σ`).
 
 **Dynamic symbol discovery.** A static symbol list has a fundamental blind spot:
 manipulation concentrates in the assets you did not think to list. BTC is too
@@ -331,7 +347,7 @@ src/cadb/
 ├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 220 tests
+tests/                 232 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -358,7 +374,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 220 tests, ~2 min
+pytest tests/ -v                                  # 232 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 

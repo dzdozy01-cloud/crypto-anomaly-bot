@@ -405,3 +405,82 @@ class TestQuietMarketDoesNotAlert:
                           sentiment_abs=0.75, bot_farm_score=0.82,
                           wall_activity=1.4))
         assert b.composite >= 80, f"genuine pump only scored {b.composite:.1f}"
+
+
+class TestSellOffDetection:
+    """A violent sell-off must alert on exchange data alone.
+
+    The three legs the user identified are exactly the design: volume z-score,
+    negative CVD, and OBI collapsing toward -1. Regression: a flash crash scored
+    only 48 because the organic-activity discount suppressed it — that discount
+    exists to filter news-driven volume, but a crash legitimately has no
+    bot-farm or on-chain markers, so it was being penalised for being real.
+    """
+
+    @pytest.fixture(scope="class")
+    def clf(self):
+        c = ManipulationClassifier(n_estimators=100, min_training_samples=100)
+        c.fit(generate_training_data(3000, 0.02, seed=42))
+        return c
+
+    def _exchange_only(self, **kw):
+        """Exchange module only — no social or on-chain, the common setup."""
+        base = _fv(**kw)
+        return FeatureVector(
+            asset="T", timestamp=0, values=base.values, coverage=0.34,
+            sources_fresh={"exchange": True, "onchain": False, "social": False},
+        )
+
+    def test_textbook_dump_alerts(self, clf):
+        b = clf.score(self._exchange_only(
+            volume_z=6.0, volume_spike_ratio=12.0, obi=-0.95, obi_abs=0.95,
+            obi_z=-6.0, cvd_z=-7.0, cvd_divergence=-0.5, spread_bps=3.0,
+            wall_activity=1.5))
+        assert b.composite >= 80, f"dump scored {b.composite:.1f}"
+
+    def test_flash_crash_alerts(self, clf):
+        """Volume spike + collapsed bids + hard negative CVD, nothing else."""
+        b = clf.score(self._exchange_only(
+            volume_z=9.0, volume_spike_ratio=25.0, obi=-0.88, obi_abs=0.88,
+            obi_z=-8.0, cvd_z=-9.0, spread_bps=5.0))
+        assert b.composite >= 80, f"flash crash scored {b.composite:.1f}"
+
+    def test_buy_panic_alerts(self, clf):
+        """Symmetric: a violent squeeze is as reportable as a dump."""
+        b = clf.score(self._exchange_only(
+            volume_z=6.0, volume_spike_ratio=12.0, obi=0.95, obi_abs=0.95,
+            obi_z=6.0, cvd_z=7.0, cvd_divergence=-0.5, spread_bps=3.0))
+        assert b.composite >= 80
+
+    def test_obi_collapse_toward_minus_one(self, clf):
+        """OBI approaching -1.0 means bid depth has been cleared."""
+        b = clf.score(self._exchange_only(
+            volume_z=5.0, volume_spike_ratio=8.0, obi=-0.98, obi_abs=0.98,
+            obi_z=-7.0, cvd_z=-6.0, spread_bps=4.0))
+        assert b.composite >= 80
+
+    def test_reason_names_the_direction(self, clf):
+        b = clf.score(self._exchange_only(
+            volume_z=6.0, volume_spike_ratio=12.0, obi=-0.9, obi_abs=0.9,
+            obi_z=-6.0, cvd_z=-7.0, spread_bps=3.0))
+        assert any("SELL-OFF" in r for r in b.reasons), b.reasons
+
+    def test_ordinary_drift_stays_quiet(self, clf):
+        b = clf.score(self._exchange_only(
+            volume_z=1.2, volume_spike_ratio=1.5, obi=0.15, obi_abs=0.15,
+            obi_z=0.6, cvd_z=0.9, spread_bps=1.2))
+        assert b.composite < 40
+
+    def test_benign_news_volume_stays_quiet(self, clf):
+        """High volume without book dislocation is news, not a dump."""
+        b = clf.score(self._exchange_only(
+            volume_z=4.0, volume_spike_ratio=6.0, obi=0.2, obi_abs=0.2,
+            obi_z=1.0, cvd_z=2.2, spread_bps=1.5))
+        assert b.composite < 60
+
+    def test_one_leg_alone_is_not_enough(self, clf):
+        """Volume alone, without book or flow confirmation, must not alert."""
+        b = clf.score(self._exchange_only(
+            volume_z=7.0, volume_spike_ratio=15.0, obi=0.1, obi_abs=0.1,
+            obi_z=0.5, cvd_z=0.8, spread_bps=1.3))
+        assert b.composite < 80, f"lone volume spike scored {b.composite:.1f}"

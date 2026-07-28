@@ -526,12 +526,25 @@ def build_feed(
         return SimulatedFeed(venue, symbols, depth, seed=seed)
     if prefer_ccxt:
         try:
-            import ccxt.pro  # noqa: F401
+            import ccxt.pro as _ccxtpro
 
-            return CCXTProFeed(venue, symbols, depth)
+            if hasattr(_ccxtpro, venue):
+                return CCXTProFeed(venue, symbols, depth)
+            log.error(
+                "venue '%s' is not supported by ccxt.pro — it has no public "
+                "market-data WebSocket. Remove it from exchange.exchanges.",
+                venue,
+            )
         except ImportError:
             log.warning("ccxt.pro unavailable; using native websocket feed for %s", venue)
     if venue in NATIVE_WS_ENDPOINTS:
         return NativeWSFeed(venue, symbols, depth)
-    log.warning("no live feed backend for %s; simulating", venue)
-    return SimulatedFeed(venue, symbols, depth, seed=seed)
+
+    # Never silently substitute synthetic data for a live venue. Doing so
+    # produces alerts about markets that were never observed — indistinguishable
+    # from real detections, and corrosive to trust in every other alert.
+    raise ValueError(
+        f"no live feed backend for '{venue}'. Supported venues are the ccxt.pro "
+        f"exchange ids (binance, bybit, mexc, gate, kucoin, coinbase, okx, kraken, …). "
+        f"Use simulate=true explicitly if you want synthetic data."
+    )
