@@ -30,6 +30,17 @@ exchange:
   use_ccxt_pro: true                # false -> native websocket clients
   simulate: false                   # true -> synthetic feed, no network
 
+  # Dynamic discovery: automatically watch pairs that are moving hard, surging
+  # in volume, or newly listed — the pairs where manipulation actually happens.
+  # `symbols` above are always watched; these are added on top.
+  discovery_enabled: true
+  discovery_interval_s: 300         # rescan every 5 minutes
+  discovery_max_symbols: 20         # per venue
+  discovery_min_volume_usd: 100000  # ignore illiquid noise
+  discovery_max_volume_usd: 50000000 # ignore majors (too deep to move)
+  discovery_min_change_pct: 15      # |24h change| to qualify (pump OR dump)
+  discovery_volume_surge: 3.0       # x median volume to qualify
+
 # -------------------------------------------- Module 2: On-Chain Whale Tracker
 onchain:
   enabled: true

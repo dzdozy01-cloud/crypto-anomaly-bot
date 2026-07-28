@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 209 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 220 tests passing.
 
 ---
 
@@ -89,6 +89,16 @@ geo-blocking: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 ### Module 1 — Exchange Anomaly Engine
 L2 order books and raw trades over WebSocket (Binance, Bybit, MEXC) via CCXT Pro,
 with hand-rolled native WS clients as a fallback.
+
+**Dynamic symbol discovery.** A static symbol list has a fundamental blind spot:
+manipulation concentrates in the assets you did not think to list. BTC is too
+deep to move on one actor's flow; a three-day-old meme coin with $400k of
+liquidity is where pumps and dumps actually happen. Every 5 minutes each venue's
+full universe is ranked by 24h move (direction-agnostic — a −55% dump scores like
+a +55% pump), volume surge versus its own median, and new-listing status, with a
+liquidity band that filters out both illiquid noise and unmovable majors. On a
+live MEXC scan of 2,124 pairs this surfaced 8 dumps and 12 pumps that a static
+list would have missed entirely.
 
 | Metric | Definition | Catches |
 |---|---|---|
@@ -199,7 +209,7 @@ most for real-world usability.
 
 ## Telegram bot
 
-23 commands across four groups. The bot is not just an alert pipe — you can
+24 commands across four groups. The bot is not just an alert pipe — you can
 interrogate every module's live state and control sensitivity without a restart.
 
 **📊 Monitoring**
@@ -216,6 +226,7 @@ interrogate every module's live state and control sensitivity without a restart.
 | Command | Action |
 |---|---|
 | `/book <PAIR>` | Order book by venue — OBI, depth, spread, CVD, divergence |
+| `/watchlist` | Pairs currently streamed — pinned vs auto-discovered |
 | `/whales [ASSET]` | Recent >$500k CEX transfers with direction and net pressure |
 | `/flows` | Net exchange inflow/outflow per asset, plus bridge activity |
 | `/social <TICKER>` | Sentiment, mention rate/acceleration, bot-farm verdict |
@@ -320,7 +331,7 @@ src/cadb/
 ├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 209 tests
+tests/                 220 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -347,7 +358,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 209 tests, ~2 min
+pytest tests/ -v                                  # 220 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 

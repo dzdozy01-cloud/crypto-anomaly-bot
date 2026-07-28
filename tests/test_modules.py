@@ -622,3 +622,92 @@ class TestRetiredEndpointDetection:
         assert not [r for r in caplog.records if "retired RPC endpoint" in r.message], (
             "shipped config.yaml must not reference retired endpoints"
         )
+
+
+class TestSymbolDiscovery:
+    """A static symbol list cannot see manipulation in unlisted assets."""
+
+    def _tickers(self, **overrides):
+        base = {
+            "BTC/USDT": {"quoteVolume": 4.5e8, "percentage": -2.2},
+            "ETH/USDT": {"quoteVolume": 3.2e8, "percentage": -2.9},
+            "QUIET/USDT": {"quoteVolume": 5.0e5, "percentage": 1.1},
+            "DUST/USDT": {"quoteVolume": 900.0, "percentage": 320.0},
+            "PUMPER/USDT": {"quoteVolume": 8.0e5, "percentage": 190.0},
+            "DUMPER/USDT": {"quoteVolume": 7.0e5, "percentage": -55.0},
+            "BTCUP/BTC": {"quoteVolume": 1e6, "percentage": 80.0},
+        }
+        base.update(overrides)
+        return base
+
+    def _disco(self, **kw):
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        params = {
+            "venue": "mexc", "max_symbols": 10, "min_volume_usd": 100_000,
+            "max_volume_usd": 50_000_000, "min_change_pct": 15.0,
+        }
+        params.update(kw)
+        return SymbolDiscovery(**params)
+
+    def test_detects_dumps_not_just_pumps(self):
+        """A crash is as much manipulation evidence as a ramp."""
+        found = {c.symbol for c in self._disco().evaluate(self._tickers())}
+        assert "DUMPER/USDT" in found, "a -55% move must be flagged"
+        assert "PUMPER/USDT" in found
+
+    def test_ignores_majors_too_deep_to_manipulate(self):
+        found = {c.symbol for c in self._disco().evaluate(self._tickers())}
+        assert "BTC/USDT" not in found
+        assert "ETH/USDT" not in found
+
+    def test_ignores_illiquid_noise(self):
+        """A $900-volume pair moves 320% on a single order — meaningless."""
+        found = {c.symbol for c in self._disco().evaluate(self._tickers())}
+        assert "DUST/USDT" not in found
+
+    def test_ignores_quiet_pairs(self):
+        found = {c.symbol for c in self._disco().evaluate(self._tickers())}
+        assert "QUIET/USDT" not in found
+
+    def test_only_configured_quote_currency(self):
+        found = {c.symbol for c in self._disco().evaluate(self._tickers())}
+        assert "BTCUP/BTC" not in found
+
+    def test_new_listing_scores_highest(self):
+        """Freshly listed low-float tokens are the highest-risk category."""
+        d = self._disco()
+        d.evaluate(self._tickers())  # first scan establishes the universe
+        t = self._tickers()
+        t["BRANDNEW/USDT"] = {"quoteVolume": 4.0e5, "percentage": 22.0}
+        found = d.evaluate(t)
+        new = next((c for c in found if c.symbol == "BRANDNEW/USDT"), None)
+        assert new is not None and "newly listed" in new.reason
+        assert new.score == max(c.score for c in found)
+
+    def test_first_scan_does_not_flag_everything_as_new(self):
+        found = self._disco().evaluate(self._tickers())
+        assert not any("newly listed" in c.reason for c in found)
+
+    def test_volume_surge_detected(self):
+        d = self._disco(min_change_pct=999)  # disable the move criterion
+        for _ in range(4):
+            d.evaluate({"SURGE/USDT": {"quoteVolume": 2.0e5, "percentage": 0.5}})
+        found = d.evaluate({"SURGE/USDT": {"quoteVolume": 3.0e6, "percentage": 0.5}})
+        assert any("volume" in c.reason for c in found)
+
+    def test_pinned_symbols_always_included(self):
+        d = self._disco(always_include=("BTC/USDT",))
+        assert "BTC/USDT" in d.watchlist(self._tickers())
+
+    def test_respects_max_symbols(self):
+        t = {f"C{i}/USDT": {"quoteVolume": 5e5, "percentage": 50.0} for i in range(60)}
+        assert len(self._disco(max_symbols=7).evaluate(t)) <= 7
+
+    def test_handles_missing_fields(self):
+        t = {
+            "A/USDT": {"quoteVolume": None, "percentage": 50.0},
+            "B/USDT": {"percentage": 50.0},
+            "C/USDT": {"quoteVolume": 5e5},
+        }
+        self._disco().evaluate(t)  # must not raise

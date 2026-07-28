@@ -14,6 +14,7 @@ One supervised task per stream, so a Bybit outage cannot stall Binance.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 from ...core.bus import EventBus
@@ -22,6 +23,7 @@ from ...core.resilience import BackoffPolicy
 from ...core.schema import MarketEvent, MetricType, SourceType, monotonic_ns, now_ms
 from ...core.telemetry import METRICS
 from ..base import Module
+from .discovery import SymbolDiscovery
 from .feeds import ExchangeFeed, build_feed
 from .microstructure import MicrostructureState
 
@@ -40,6 +42,9 @@ class ExchangeEngine(Module):
         self.states: dict[tuple[str, str], MicrostructureState] = {}
         self._obi_emit_gate: dict[tuple[str, str], int] = {}
         self.obi_emit_interval_ms = 500  # throttle steady-state book telemetry
+        self.discovery: dict[str, SymbolDiscovery] = {}
+        self.watched: dict[str, set[str]] = {}   # venue -> currently streamed symbols
+        self._stream_tasks: dict[tuple[str, str], list[Any]] = {}
 
     # ---- state ---------------------------------------------------------
     def state_for(self, venue: str, symbol: str) -> MicrostructureState:
@@ -69,22 +74,98 @@ class ExchangeEngine(Module):
                 prefer_ccxt=self.config.use_ccxt_pro,
             )
             self.feeds[venue] = feed
+            self.watched[venue] = set()
             for symbol in self.config.symbols:
-                self.supervise(
-                    f"book:{venue}:{symbol}",
-                    self._make_book_loop(feed, symbol),
-                    BackoffPolicy(initial=1.0, maximum=60.0),
+                self._subscribe(venue, symbol)
+
+            if self.config.discovery_enabled and not self.config.simulate:
+                self.discovery[venue] = SymbolDiscovery(
+                    venue=venue,
+                    max_symbols=self.config.discovery_max_symbols,
+                    min_volume_usd=self.config.discovery_min_volume_usd,
+                    max_volume_usd=self.config.discovery_max_volume_usd,
+                    min_change_pct=self.config.discovery_min_change_pct,
+                    volume_surge_ratio=self.config.discovery_volume_surge,
+                    always_include=tuple(self.config.symbols),
                 )
-                self.supervise(
-                    f"trades:{venue}:{symbol}",
-                    self._make_trade_loop(feed, symbol),
-                    BackoffPolicy(initial=1.0, maximum=60.0),
-                )
+
         self.spawn("bucket-flusher", self._flush_loop())
+        if self.discovery:
+            self.spawn("discovery", self._discovery_loop())
         self.log.info(
             "exchange engine watching %d venue(s) x %d symbol(s)",
             len(self.feeds), len(self.config.symbols),
         )
+
+    def _subscribe(self, venue: str, symbol: str) -> None:
+        """Start book + trade streams for one pair (idempotent)."""
+        if symbol in self.watched.setdefault(venue, set()):
+            return
+        feed = self.feeds[venue]
+        tasks = [
+            self.supervise(
+                f"book:{venue}:{symbol}",
+                self._make_book_loop(feed, symbol),
+                BackoffPolicy(initial=1.0, maximum=60.0),
+            ),
+            self.supervise(
+                f"trades:{venue}:{symbol}",
+                self._make_trade_loop(feed, symbol),
+                BackoffPolicy(initial=1.0, maximum=60.0),
+            ),
+        ]
+        self._stream_tasks[(venue, symbol)] = tasks
+        self.watched[venue].add(symbol)
+
+    async def _unsubscribe(self, venue: str, symbol: str) -> None:
+        """Stop streaming a pair that no longer qualifies."""
+        tasks = self._stream_tasks.pop((venue, symbol), [])
+        for t in tasks:
+            with contextlib.suppress(Exception):
+                await t.stop()
+            if t in self._tasks:
+                self._tasks.remove(t)
+        self.watched.get(venue, set()).discard(symbol)
+        # Drop the state so a re-listed pair starts from a clean baseline
+        # rather than inheriting a stale distribution.
+        self.states.pop((venue, symbol), None)
+
+    async def _discovery_loop(self) -> None:
+        """Periodically re-rank each venue and adjust subscriptions."""
+        # Let the pinned symbols establish themselves before adding more.
+        await asyncio.sleep(10)
+        while True:
+            for venue, disco in list(self.discovery.items()):
+                try:
+                    await self._rescan(venue, disco)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self.log.warning("%s discovery scan failed: %s", venue, exc)
+            await asyncio.sleep(self.config.discovery_interval_s)
+
+    async def _rescan(self, venue: str, disco: SymbolDiscovery) -> None:
+        feed = self.feeds.get(venue)
+        client = getattr(feed, "_client", None) or (
+            feed._ensure_client() if hasattr(feed, "_ensure_client") else None
+        )
+        if client is None or not hasattr(client, "fetch_tickers"):
+            return
+
+        tickers = await client.fetch_tickers()
+        wanted = set(disco.watchlist(tickers))
+        pinned = set(self.config.symbols)
+        current = set(self.watched.get(venue, set()))
+
+        for symbol in wanted - current:
+            self._subscribe(venue, symbol)
+            self.log.info("📡 now watching %s %s", venue, symbol)
+        # Never drop a pinned symbol, regardless of how quiet it gets.
+        for symbol in (current - wanted) - pinned:
+            await self._unsubscribe(venue, symbol)
+            self.log.info("💤 stopped watching %s %s", venue, symbol)
+
+        METRICS.gauge(f"exchange.{venue}.watched", len(self.watched.get(venue, set())))
 
     def _make_book_loop(self, feed: ExchangeFeed, symbol: str) -> Any:
         async def loop() -> None:
@@ -245,4 +326,6 @@ class ExchangeEngine(Module):
             v: {"connected": f.connected, "messages": f.messages} for v, f in self.feeds.items()
         }
         base["tracked_pairs"] = len(self.states)
+        base["watched"] = {v: sorted(syms) for v, syms in self.watched.items()}
+        base["discovery"] = {v: d.stats() for v, d in self.discovery.items()}
         return base

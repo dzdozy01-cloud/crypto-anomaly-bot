@@ -115,6 +115,19 @@ class ExchangeConfig(BaseModel):
     use_ccxt_pro: bool = True
     simulate: bool = False              # deterministic synthetic feed (demo/tests)
 
+    # --- dynamic symbol discovery ---
+    # A static symbol list cannot see manipulation in assets you did not think
+    # to list — which is where it overwhelmingly happens. When enabled, each
+    # venue is periodically ranked and the most suspicious pairs are subscribed
+    # automatically alongside `symbols`.
+    discovery_enabled: bool = True
+    discovery_interval_s: int = 300     # rescan cadence
+    discovery_max_symbols: int = 20     # per venue, on top of `symbols`
+    discovery_min_volume_usd: float = 100_000.0   # below this is noise
+    discovery_max_volume_usd: float = 50_000_000.0  # above this is not cheaply moved
+    discovery_min_change_pct: float = 15.0        # |24h move| to qualify
+    discovery_volume_surge: float = 3.0           # x median volume to qualify
+
 
 class OnChainConfig(BaseModel):
     # validate_default so ${ENV} placeholders in defaults are expanded too.

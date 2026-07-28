@@ -111,6 +111,7 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             "/history [ASSET] — recent alerts fired\n\n"
             "<b>🔍 Per-module detail</b>\n"
             "/book &lt;PAIR&gt; — order book, OBI, CVD by venue\n"
+            "/watchlist — pairs currently streamed\n"
             "/whales [ASSET] — recent large on-chain transfers\n"
             "/flows — net exchange inflow/outflow\n"
             "/social &lt;TICKER&gt; — sentiment, mentions, bot farms\n\n"
@@ -599,6 +600,48 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
         bot.muted_until = 0.0
         return "🔔 Unmuted."
 
+    # ----------------------------------------------------- /watchlist
+    async def watchlist_cmd(args: list[str], chat_id: int) -> str:
+        """Show which pairs are streamed, and which were auto-discovered."""
+        if not app.exchange:
+            return "⚠️ Exchange engine not enabled."
+        pinned = set(app.settings.exchange.symbols)
+        lines = ["<b>📡 Watchlist</b>", ""]
+        total = 0
+        for venue in sorted(app.exchange.watched):
+            syms = sorted(app.exchange.watched[venue])
+            total += len(syms)
+            lines.append(f"<b>{venue}</b> — {len(syms)} pair(s)")
+            for sym in syms[:14]:
+                tag = "📌" if sym in pinned else "🔎"
+                st = app.exchange.states.get((venue, sym))
+                extra = ""
+                if st:
+                    snap = st.snapshot()
+                    if snap["volume_z"]:
+                        extra = f"  z={snap['volume_z']:+.1f}"
+                lines.append(f"  {tag} <code>{sym}</code>{extra}")
+            if len(syms) > 14:
+                lines.append(f"  <i>… and {len(syms) - 14} more</i>")
+            lines.append("")
+
+        if app.exchange.discovery:
+            lines.append("<b>Discovery</b>")
+            for venue, d in app.exchange.discovery.items():
+                st = d.stats()
+                ago = st["last_scan_s_ago"]
+                lines.append(
+                    f"  {venue}: {st['universe']:,} pairs scanned"
+                    + (f", last {ago:.0f}s ago" if ago else ", pending")
+                )
+        else:
+            lines.append(
+                "<i>Discovery disabled — only pinned symbols are watched. "
+                "Set exchange.discovery_enabled: true to auto-track movers.</i>"
+            )
+        lines += ["", f"<i>📌 pinned · 🔎 auto-discovered · {total} streams</i>"]
+        return "\n".join(lines)
+
     # -------------------------------------------------------- /whoami
     async def whoami_cmd(args: list[str], chat_id: int) -> str:
         """Report this chat's id and whether alerts will actually reach it.
@@ -687,5 +730,6 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
     bot.register("pause", pause_cmd, "Pause alert delivery")
     bot.register("resume", resume_cmd, "Resume alert delivery")
     bot.register("unmute", unmute_cmd, "Cancel an active mute")
+    bot.register("watchlist", watchlist_cmd, "Pairs currently streamed")
     bot.register("whoami", whoami_cmd, "Show this chat id and alert routing")
     bot.register("test", test_cmd, "Send a test alert")
