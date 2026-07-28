@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import signal
 import time
 from collections import deque
@@ -60,8 +61,26 @@ class Application:
     async def setup(self) -> None:
         s = self.settings
         setup_logging(s.telemetry.log_level, s.telemetry.json_logs)
+        from . import __version__
+
+        # Print a build fingerprint. "Did my rebuild actually take effect?" was
+        # otherwise unanswerable from the logs — `docker compose up -d` reports
+        # "Running" and silently keeps the old container when only source
+        # changed, so a fix can appear not to work when it simply is not loaded.
+        build = os.getenv("CADB_BUILD", "")
+        stamp = ""
+        with contextlib.suppress(Exception):
+            src = Path(__file__).resolve().parent
+            newest = max(f.stat().st_mtime for f in src.rglob("*.py"))
+            stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(newest))
         log.info("=" * 68)
         log.info("  CADB — Crypto Anomaly Detection Bot")
+        log.info(
+            "  v%s%s%s",
+            __version__,
+            f" · build {build}" if build else "",
+            f" · code {stamp}" if stamp else "",
+        )
         log.info("=" * 68)
 
         self.bus = await build_bus(

@@ -341,13 +341,36 @@ def _warn_retired_endpoints(settings: Settings, path: str | Path | None) -> None
     import logging
 
     log = logging.getLogger(__name__)
-    configured = list(settings.onchain.evm_rpc.values()) + [settings.onchain.solana_rpc]
-    for url in configured:
+    # Map each chain to the env var that can override it, so the warning can
+    # name the *actual* source. Blaming config.yaml when the value came from an
+    # environment variable sends people to edit a file that is already correct.
+    env_for_chain = {
+        "ethereum": "ETH_RPC_URL",
+        "bsc": "BSC_RPC_URL",
+        "polygon": "POLYGON_RPC_URL",
+    }
+    targets: list[tuple[str, str, str | None]] = [
+        (chain, url, env_for_chain.get(chain))
+        for chain, url in settings.onchain.evm_rpc.items()
+    ]
+    targets.append(("solana", settings.onchain.solana_rpc, "SOLANA_RPC_URL"))
+
+    for chain, url, env_var in targets:
         for bad, reason in RETIRED_ENDPOINTS.items():
-            if bad in (url or ""):
+            if bad not in (url or ""):
+                continue
+            from_env = bool(env_var and os.getenv(env_var))
+            if from_env:
                 log.warning(
-                    "config uses retired RPC endpoint '%s' (%s). "
-                    "Your %s is out of date — it is bind-mounted, so rebuilding "
+                    "%s is using retired RPC endpoint '%s' (%s). "
+                    "This came from the %s environment variable, not %s — "
+                    "edit or remove that line in your .env and restart.",
+                    chain, bad, reason, env_var, path or "config.yaml",
+                )
+            else:
+                log.warning(
+                    "%s is using retired RPC endpoint '%s' (%s). "
+                    "Your %s is out of date — if it is bind-mounted, rebuilding "
                     "the image does NOT update it. Run: ./deploy/update.sh --config",
-                    bad, reason, path or "config.yaml",
+                    chain, bad, reason, path or "config.yaml",
                 )

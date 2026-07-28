@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Update a running CADB deployment.
 #
-#   ./deploy/update.sh              # pull image + restart
+#   ./deploy/update.sh              # rebuild/pull + force-recreate + verify
 #   ./deploy/update.sh --config     # ALSO refresh config.yaml from the repo
 #
 # Why --config exists: docker-compose bind-mounts ~/cadb/config.yaml over the
@@ -59,14 +59,18 @@ if grep -q "llamarpc\|bsc-dataseed" config.yaml 2>/dev/null; then
 fi
 
 if [[ -f docker-compose.yml ]] && grep -q "build:" docker-compose.yml; then
-  c_info "building image locally"
+  c_info "building image locally (source changed)"
   docker compose build
 else
   c_info "pulling image"
   docker compose pull
 fi
 
-docker compose up -d --remove-orphans
+# --force-recreate is required. `docker compose up -d` compares the *compose
+# file*, not the image contents, so after a rebuild that only changed Python
+# source it reports "Running" and leaves the old container in place — the new
+# code never runs, which is indistinguishable from the fix not working.
+docker compose up -d --remove-orphans --force-recreate
 c_ok "restarted"
 
 echo

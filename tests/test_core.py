@@ -571,3 +571,63 @@ class TestEndpointSanitisation:
     def test_legitimate_url_untouched(self, tmp_path, monkeypatch):
         url = "https://solana-mainnet.g.alchemy.com/v2/AbC-123_xyz"
         assert self._resolve(tmp_path, monkeypatch, url) == url
+
+
+class TestRetiredEndpointAttribution:
+    """The warning must name the real source of a bad endpoint.
+
+    Regression: the message always blamed config.yaml, even when the value came
+    from an environment variable. That sent a user to run `update.sh --config`
+    repeatedly against a file that was already correct, while the actual
+    override sat in .env.
+    """
+
+    def test_env_override_is_attributed_to_env(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "onchain:\n  evm_rpc:\n    bsc: ${BSC_RPC_URL:-https://good.example}\n"
+        )
+        monkeypatch.setenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org")
+        with caplog.at_level(logging.WARNING):
+            load_settings(cfg)
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "BSC_RPC_URL" in joined, "must name the env var"
+        assert ".env" in joined, "must point at .env"
+
+    def test_yaml_source_is_attributed_to_file(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        monkeypatch.delenv("BSC_RPC_URL", raising=False)
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "onchain:\n  evm_rpc:\n    bsc: https://bsc-dataseed.binance.org\n"
+        )
+        with caplog.at_level(logging.WARNING):
+            load_settings(cfg)
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "update.sh --config" in joined
+        assert "BSC_RPC_URL environment variable" not in joined
+
+    def test_clean_config_produces_no_warning(self, monkeypatch, caplog):
+        import logging
+        from pathlib import Path
+
+        for var in ("BSC_RPC_URL", "ETH_RPC_URL", "SOLANA_RPC_URL"):
+            monkeypatch.delenv(var, raising=False)
+        cfg = Path(__file__).resolve().parent.parent / "config.yaml"
+        with caplog.at_level(logging.WARNING):
+            load_settings(cfg)
+        assert not [r for r in caplog.records if "retired RPC endpoint" in r.message]
+
+
+class TestUpdateScriptForcesRecreate:
+    def test_force_recreate_present(self):
+        """`up -d` keeps the old container when only source changed."""
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent / "deploy" / "update.sh").read_text()
+        assert "--force-recreate" in text, (
+            "without it a rebuilt image silently does not take effect"
+        )

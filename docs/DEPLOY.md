@@ -284,6 +284,28 @@ Sparse volume buckets collapsed the MAD estimator, so the first trade after a
 quiet 5s window scored 50 sigma. Volume, CVD and mention series are now declared
 as count-based, where zeros are ordinary. Rebuild to pick this up.
 
+**Changes don't take effect after `git pull`** — `docker compose up -d` compares
+the *compose file*, not the image contents. When only Python source changed it
+reports `Running` and keeps the old container, so a fix appears not to work when
+it simply is not loaded. Always use:
+
+```bash
+./deploy/update.sh          # rebuild + force-recreate + health check
+```
+
+The startup banner now prints a code timestamp, so you can confirm at a glance
+which build is live:
+
+```
+  CADB — Crypto Anomaly Detection Bot
+  v1.0.0 · code 2026-07-28 00:17
+```
+
+**A retired endpoint warning that persists after updating config.yaml** — the
+value is coming from your `.env`, not the YAML. Environment variables override
+config defaults by design. The warning now names the responsible variable
+(e.g. `BSC_RPC_URL`); remove or fix that line and restart.
+
 **Added an API key but still seeing 429 / rate limits** — the key is probably
 not reaching the app. Docker's `env_file` keeps quotes and inline comments
 literally, so `SOLANA_RPC_URL="https://..."` yields an invalid URL. Remove any
