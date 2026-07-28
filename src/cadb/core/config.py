@@ -36,6 +36,37 @@ RETIRED_ENDPOINTS: dict[str, str] = {
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
 
 
+def _clean_endpoint(url: str) -> str:
+    """Normalise a URL that came from an env var or YAML.
+
+    Docker's ``env_file`` parser is not a shell: it does **not** strip surrounding
+    quotes, trailing whitespace or inline ``#`` comments. A line like
+    ``SOLANA_RPC_URL="https://..."`` therefore yields a literal leading quote,
+    and the request fails with a URL-encoded ``%22`` host — which surfaces as a
+    generic connection error and looks identical to the endpoint being down.
+    That cost real debugging time, so we sanitise instead of trusting the input.
+    """
+    if not isinstance(url, str):
+        return url
+    cleaned = url.strip()
+    # Strip an inline comment, but only when it is clearly separated, so we
+    # never truncate a legitimate URL fragment.
+    for sep in ("  #", "\t#"):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0].rstrip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in "\"'":
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def _clean_endpoint_list(value: str) -> str:
+    """Sanitise a comma-separated endpoint list, dropping empty entries."""
+    if not isinstance(value, str):
+        return value
+    parts = [_clean_endpoint(p) for p in value.split(",")]
+    return ",".join(p for p in parts if p)
+
+
 def _expand(value: Any) -> Any:
     """Recursively expand ``${VAR}`` / ``${VAR:-default}`` references.
 
@@ -122,12 +153,14 @@ class OnChainConfig(BaseModel):
     @field_validator("evm_rpc", "solana_rpc", mode="after")
     @classmethod
     def _resolve_rpc(cls, v):
-        """Same placeholder-expansion guard as AlertConfig (see note there)."""
+        """Expand ${ENV} placeholders and sanitise the resulting URLs."""
         if isinstance(v, str):
-            return _expand(v) if "${" in v else v
+            return _clean_endpoint_list(_expand(v) if "${" in v else v)
         if isinstance(v, dict):
-            return {k: (_expand(u) if isinstance(u, str) and "${" in u else u)
-                    for k, u in v.items()}
+            return {
+                k: _clean_endpoint_list(_expand(u) if isinstance(u, str) and "${" in u else u)
+                for k, u in v.items()
+            }
         return v
 
 

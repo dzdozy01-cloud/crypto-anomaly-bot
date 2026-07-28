@@ -177,6 +177,15 @@ class WhaleTracker(Module):
                 "liquidity", self._liquidity_loop, BackoffPolicy(initial=3.0, maximum=120.0)
             )
 
+        # Log the *resolved* provider per chain. Without this, a key that silently
+        # failed to load is indistinguishable from a key that is being used —
+        # the only symptom is rate limiting, which looks like a provider problem
+        # rather than a configuration one.
+        for chain, client in self.evm.items():
+            self.log.info("  %-8s -> %s", chain, self._describe_endpoints(client))
+        if self.solana:
+            self.log.info("  %-8s -> %s", "solana", self._describe_endpoints(self.solana))
+
         self.log.info(
             "onchain tracker: %d EVM chain(s), solana=%s, %d pools, %d watched wallets",
             len(self.evm), bool(self.solana), len(self.registry.pools),
@@ -491,6 +500,18 @@ class WhaleTracker(Module):
         pool.last_tvl_usd, pool.last_block = tvl, block
 
     # ---- emission --------------------------------------------------------
+    @staticmethod
+    def _describe_endpoints(client: Any) -> str:
+        """Render endpoints as ``host (keyed)`` without leaking the key itself."""
+        parts = []
+        for ep in getattr(client, "endpoints", []):
+            url = ep.url
+            host = url.split("/")[2] if "//" in url else url
+            # A path segment beyond the host implies a project id / API key.
+            keyed = len([p for p in url.split("/")[3:] if p]) > 0
+            parts.append(f"{host} [{'keyed' if keyed else 'public'}]")
+        return ", ".join(parts) or "none"
+
     def _flow_key(self, chain: str, symbol: str) -> str:
         return f"{chain}:{symbol}"
 

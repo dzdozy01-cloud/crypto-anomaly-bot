@@ -284,6 +284,12 @@ Sparse volume buckets collapsed the MAD estimator, so the first trade after a
 quiet 5s window scored 50 sigma. Volume, CVD and mention series are now declared
 as count-based, where zeros are ordinary. Rebuild to pick this up.
 
+**Added an API key but still seeing 429 / rate limits** — the key is probably
+not reaching the app. Docker's `env_file` keeps quotes and inline comments
+literally, so `SOLANA_RPC_URL="https://..."` yields an invalid URL. Remove any
+quotes, then verify with `docker compose exec cadb cadb validate -c config.yaml`
+— it prints `[keyed]` or `[public — rate limited]` per chain.
+
 **Exchange 451/403** — geo-block, covered above. Drop the venue or change region.
 
 **Out of memory on the micro shape** — set `social.use_finbert: false` in

@@ -239,6 +239,38 @@ A `❌ NOT CONFIGURED` line means that chain is not being monitored at all.
 
 ---
 
+## Your key is set but still rate limited?
+
+Docker's `env_file` parser is **not** a shell. It keeps quotes, trailing spaces
+and inline comments literally:
+
+```bash
+SOLANA_RPC_URL="https://..."      # ❌ quotes became part of the URL
+SOLANA_RPC_URL=https://...  # key # ❌ comment became part of the URL
+SOLANA_RPC_URL=https://...        # ✅ correct
+```
+
+CADB now sanitises these automatically, but older builds failed with a generic
+connection error that looked exactly like the provider being down.
+
+Confirm which endpoint is actually in use — this is the fastest way to tell a
+config problem from a provider problem:
+
+```bash
+docker compose exec cadb cadb validate -c config.yaml
+```
+
+```
+  on-chain endpoints:
+    ✅ ethereum  eth-mainnet.g.alchemy.com [keyed]
+    ✅ solana    solana-mainnet.g.alchemy.com [keyed]
+```
+
+`[public — rate limited]` means your key is **not** being picked up. The same
+line is logged at startup, so `docker compose logs cadb | head -30` shows it too.
+
+---
+
 ## Loading and verifying
 
 ```bash

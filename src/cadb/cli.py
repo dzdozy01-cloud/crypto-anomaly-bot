@@ -174,16 +174,20 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if endpoints:
             inert = False
             host = endpoints[0].split("/")[2] if "//" in endpoints[0] else endpoints[0]
+            keyed = len([p for p in endpoints[0].split("/")[3:] if p]) > 0
+            tag = "keyed" if keyed else "public — rate limited"
             extra = f" (+{len(endpoints) - 1} failover)" if len(endpoints) > 1 else ""
-            print(f"    ✅ {chain:<9} {host}{extra}")
+            print(f"    ✅ {chain:<9} {host} [{tag}]{extra}")
         else:
             print(f"    ❌ {chain:<9} NOT CONFIGURED — this chain will not be monitored")
     sol = [u.strip() for u in (settings.onchain.solana_rpc or "").split(",") if u.strip()]
     if sol:
         inert = False
         host = sol[0].split("/")[2] if "//" in sol[0] else sol[0]
+        keyed = len([p for p in sol[0].split("/")[3:] if p]) > 0
+        tag = "keyed" if keyed else "public — rate limited"
         extra = f" (+{len(sol) - 1} failover)" if len(sol) > 1 else ""
-        print(f"    ✅ {'solana':<9} {host}{extra}")
+        print(f"    ✅ {'solana':<9} {host} [{tag}]{extra}")
     else:
         print(f"    ❌ {'solana':<9} NOT CONFIGURED — SPL tracking disabled")
     if inert and settings.onchain.enabled and not settings.onchain.simulate:

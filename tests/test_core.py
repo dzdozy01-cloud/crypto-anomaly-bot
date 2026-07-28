@@ -516,3 +516,58 @@ class TestSparseSeriesZScore:
         vp.add_trade(t + 100 * 5000, 50.0, 100.0)
         z = vp.add_trade(t + 101 * 5000, 1.0, 100.0)
         assert z is not None and z > 3.0, "real spikes must still fire"
+
+
+class TestEndpointSanitisation:
+    """Regression: quoted/padded env values silently broke RPC connections.
+
+    Docker's `env_file` parser is not a shell — it keeps surrounding quotes,
+    trailing whitespace and inline comments verbatim. `SOLANA_RPC_URL="https://…"`
+    therefore produced a URL beginning with a literal quote, which fails as
+    `%22https://…` and is indistinguishable from the provider being down. A user
+    who had correctly added an Alchemy key still saw 429s from the public node.
+    """
+
+    def _resolve(self, tmp_path, monkeypatch, value):
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            "onchain:\n  solana_rpc: ${SOLANA_RPC_URL:-https://fallback.example}\n"
+        )
+        monkeypatch.setenv("SOLANA_RPC_URL", value)
+        return load_settings(cfg).onchain.solana_rpc
+
+    def test_double_quotes_stripped(self, tmp_path, monkeypatch):
+        got = self._resolve(tmp_path, monkeypatch, '"https://x.example/v2/KEY"')
+        assert got == "https://x.example/v2/KEY"
+
+    def test_single_quotes_stripped(self, tmp_path, monkeypatch):
+        got = self._resolve(tmp_path, monkeypatch, "'https://x.example/v2/KEY'")
+        assert got == "https://x.example/v2/KEY"
+
+    def test_whitespace_stripped(self, tmp_path, monkeypatch):
+        got = self._resolve(tmp_path, monkeypatch, "  https://x.example/v2/KEY  ")
+        assert got == "https://x.example/v2/KEY"
+
+    def test_inline_comment_removed(self, tmp_path, monkeypatch):
+        got = self._resolve(tmp_path, monkeypatch, "https://x.example/v2/KEY  # mine")
+        assert got == "https://x.example/v2/KEY"
+
+    def test_failover_list_sanitised_per_entry(self, tmp_path, monkeypatch):
+        got = self._resolve(
+            tmp_path, monkeypatch, '"https://a.example/v2/K" , https://b.example '
+        )
+        assert got == "https://a.example/v2/K,https://b.example"
+
+    def test_empty_entries_dropped(self, tmp_path, monkeypatch):
+        got = self._resolve(tmp_path, monkeypatch, "https://a.example,,  ,https://b.example")
+        assert got == "https://a.example,https://b.example"
+
+    def test_evm_dict_sanitised_too(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("onchain:\n  evm_rpc:\n    ethereum: ${ETH_RPC_URL:-https://fb.example}\n")
+        monkeypatch.setenv("ETH_RPC_URL", '"https://eth.example/v2/KEY"')
+        assert load_settings(cfg).onchain.evm_rpc["ethereum"] == "https://eth.example/v2/KEY"
+
+    def test_legitimate_url_untouched(self, tmp_path, monkeypatch):
+        url = "https://solana-mainnet.g.alchemy.com/v2/AbC-123_xyz"
+        assert self._resolve(tmp_path, monkeypatch, url) == url
