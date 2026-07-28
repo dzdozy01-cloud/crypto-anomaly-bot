@@ -74,22 +74,42 @@ docker compose up -d --remove-orphans --force-recreate
 c_ok "restarted"
 
 echo
+# Resolve the real container id. Compose prefixes names with the project
+# directory (crypto-anomaly-bot-cadb-1), so `docker inspect cadb` fails and the
+# old `||` fallback chain concatenated both branches into a multi-line value —
+# which then never equalled "running" and reported a false failure on a
+# perfectly healthy container.
+container_state() {
+  local cid
+  cid=$(docker compose ps -q cadb 2>/dev/null | head -n1)
+  if [[ -z "$cid" ]]; then
+    echo "missing"
+    return
+  fi
+  docker inspect --format='{{.State.Status}}' "$cid" 2>/dev/null | head -n1 || echo unknown
+}
+
 c_info "waiting for health…"
+HEALTHY=0
 for i in $(seq 1 24); do
   sleep 5
   if docker compose logs --tail=200 cadb 2>&1 | grep -q "system online"; then
     c_ok "healthy after $((i*5))s"
+    HEALTHY=1
     break
   fi
-  STATE=$(docker inspect --format='{{.State.Status}}' cadb 2>/dev/null \
-        || docker compose ps -q cadb | xargs -r docker inspect --format='{{.State.Status}}' 2>/dev/null \
-        || echo missing)
+  STATE="$(container_state)"
   if [[ "$STATE" != "running" ]]; then
     printf '\033[31m❌ container state=%s\033[0m\n' "$STATE"
     docker compose logs --tail=50 cadb
     exit 1
   fi
 done
+
+if (( ! HEALTHY )); then
+  c_warn "no 'system online' within 120s — container is running; check logs"
+  docker compose logs --tail=30 cadb
+fi
 
 echo
 docker compose exec -T cadb cadb validate -c config.yaml 2>/dev/null || true

@@ -119,8 +119,13 @@ jobs:
             docker compose pull cadb
             echo "::endgroup::"
 
+            # Resolve the compose-managed container id. Compose prefixes names
+            # with the project directory, so `docker inspect cadb` fails and the
+            # rollback/health logic silently degrades.
+            cid() { docker compose ps -q cadb 2>/dev/null | head -n1; }
+
             # Keep the currently-running image so we can roll back.
-            PREVIOUS=$(docker inspect --format='{{.Image}}' cadb 2>/dev/null || echo "")
+            PREVIOUS=$(docker inspect --format='{{.Image}}' "$(cid)" 2>/dev/null || echo "")
 
             echo "::group::Restart"
             docker compose up -d --remove-orphans
@@ -132,7 +137,12 @@ jobs:
             echo "Waiting for health..."
             for i in $(seq 1 30); do
               sleep 5
-              STATE=$(docker inspect --format='{{.State.Status}}' cadb 2>/dev/null || echo missing)
+              C=$(cid)
+              if [ -z "$C" ]; then
+                STATE=missing
+              else
+                STATE=$(docker inspect --format='{{.State.Status}}' "$C" 2>/dev/null | head -n1 || echo unknown)
+              fi
               if [ "$STATE" != "running" ]; then
                 echo "❌ container state=$STATE after $((i*5))s"
                 docker compose logs --tail=60 cadb

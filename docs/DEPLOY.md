@@ -284,6 +284,12 @@ Sparse volume buckets collapsed the MAD estimator, so the first trade after a
 quiet 5s window scored 50 sigma. Volume, CVD and mention series are now declared
 as count-based, where zeros are ordinary. Rebuild to pick this up.
 
+**`❌ container state=` followed by `running`** — fixed. The health check
+inspected the container by service name, but Compose prefixes it with the
+project directory (`crypto-anomaly-bot-cadb-1`), so the lookup failed and
+produced a malformed multi-line value. It now resolves the id via
+`docker compose ps -q`. If you saw this, the deploy had actually succeeded.
+
 **Changes don't take effect after `git pull`** — `docker compose up -d` compares
 the *compose file*, not the image contents. When only Python source changed it
 reports `Running` and keeps the old container, so a fix appears not to work when

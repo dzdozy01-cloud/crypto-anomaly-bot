@@ -631,3 +631,49 @@ class TestUpdateScriptForcesRecreate:
         assert "--force-recreate" in text, (
             "without it a rebuilt image silently does not take effect"
         )
+
+
+class TestDeployHealthCheck:
+    """Regression: the update script reported a false failure on a healthy run.
+
+    Compose prefixes container names with the project directory
+    (`crypto-anomaly-bot-cadb-1`), so `docker inspect cadb` fails. The old
+    `||` fallback chain then concatenated both branches into a multi-line
+    value, which never equalled "running" and aborted with
+    `❌ container state=\\nrunning` on a perfectly healthy container.
+    """
+
+    def _script(self, name: str) -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parent.parent / "deploy" / name).read_text()
+
+    def test_resolves_container_via_compose(self):
+        text = self._script("update.sh")
+        assert "docker compose ps -q cadb" in text
+        assert "container_state()" in text, "state lookup must be a single function"
+
+    def test_no_bare_inspect_by_service_name(self):
+        """`docker inspect cadb` only works if the container is literally named that."""
+        text = self._script("update.sh")
+        assert "docker inspect --format='{{.State.Status}}' cadb " not in text
+        assert "docker inspect --format='{{.State.Status}}' cadb\n" not in text
+
+    def test_state_output_is_single_line(self):
+        text = self._script("update.sh")
+        assert "head -n1" in text, "must not emit multi-line state values"
+
+    def test_timeout_does_not_report_failure(self):
+        """Missing the log line is a warning, not a failed deploy."""
+        text = self._script("update.sh")
+        assert "HEALTHY=0" in text and "if (( ! HEALTHY ))" in text
+
+    def test_workflow_uses_same_resolution(self):
+        from pathlib import Path
+
+        wf = (
+            Path(__file__).resolve().parent.parent
+            / ".github" / "workflows" / "deploy.yml"
+        ).read_text()
+        assert "cid()" in wf, "CI deploy needs the same container resolution"
+        assert 'docker inspect --format=\'{{.State.Status}}\' cadb ' not in wf
