@@ -94,15 +94,34 @@ class TestOrderBook:
 # ---------------------------------------------------- Module 1: volume
 class TestVolumeProfile:
     def test_bucket_accumulation_and_zscore(self):
+        """Buckets must close on schedule even when the z-score abstains.
+
+        A perfectly constant series has zero dispersion, so no defensible
+        z-score exists — but the volume observation is still real and must
+        reach downstream consumers.
+        """
+        import random
+
         vp = VolumeProfile(symbol="X/Y", venue="v", window_s=300, bucket_s=5, threshold=3.0)
         t = (now_ms() // 5000) * 5000
-        zs = []
+        closes = 0
         for i in range(80):
-            z = vp.add_trade(t + i * 5000, 1.0, 100.0)
-            if z is not None:
-                zs.append(z)
-        assert len(zs) > 20
+            vp.add_trade(t + i * 5000, 1.0, 100.0)
+            if vp.bucket_closed:
+                closes += 1
+        assert closes > 60, "buckets must close regardless of z availability"
         assert vp.total_trades == 80
+
+        # With real dispersion, z-scores do appear.
+        rng = random.Random(0)
+        vp2 = VolumeProfile(symbol="X/Y", venue="v", window_s=300, bucket_s=5)
+        t2 = (now_ms() // 5000) * 5000
+        zs = [
+            z for i in range(80)
+            if (z := vp2.add_trade(t2 + i * 5000, abs(rng.lognormvariate(0, 0.8)), 100.0))
+            is not None
+        ]
+        assert len(zs) > 20
 
     def test_detects_3sigma_volume_spike(self):
         vp = VolumeProfile(symbol="X/Y", venue="v", window_s=300, bucket_s=5, threshold=3.0)
@@ -167,7 +186,8 @@ class TestMicrostructureState:
         st = MicrostructureState(venue="binance", symbol="BTC/USDT")
         t = now_ms()
         st.book.update([(99.0, 5.0)], [(101.0, 5.0)], t)
-        st.on_trade(t, 100.0, 1.0, "buy")
+        closed, z = st.on_trade(t, 100.0, 1.0, "buy")
+        assert isinstance(closed, bool)
         snap = st.snapshot()
         for key in ("obi", "volume_z", "cvd", "cvd_divergence", "absorption"):
             assert key in snap

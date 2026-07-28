@@ -157,10 +157,15 @@ class ExchangeEngine(Module):
     async def _on_trade(self, trade: Any) -> None:
         t0 = monotonic_ns()
         st = self.state_for(trade.venue, trade.symbol)
-        bucket_z = st.on_trade(trade.timestamp, trade.price, trade.size, trade.side)  # type: ignore[arg-type]
+        bucket_closed, bucket_z = st.on_trade(
+            trade.timestamp, trade.price, trade.size, trade.side  # type: ignore[arg-type]
+        )
 
         # A closed volume bucket is the sampling point for the 5-minute z-score.
-        if bucket_z is not None:
+        # Publish on *closure*, not on z availability — a None z means "no
+        # defensible dispersion estimate yet", but the volume observation itself
+        # is still real and downstream consumers need it.
+        if bucket_closed:
             exceeded = st.volume.exceeds_threshold(bucket_z)
             await self.emit(
                 MarketEvent(

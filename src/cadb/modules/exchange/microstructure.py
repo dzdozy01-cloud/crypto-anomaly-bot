@@ -233,6 +233,12 @@ class VolumeProfile:
     zscore: DynamicZScore = field(init=False, repr=False)
     cusum: CusumDetector = field(default_factory=CusumDetector, repr=False)
     total_trades: int = 0
+    # A bucket can close without a usable z-score (the estimator abstains while
+    # dispersion is degenerate). Telemetry must still be published in that case:
+    # withholding the observation entirely would starve the feature store and
+    # make the whole asset invisible, which is far worse than a missing z.
+    bucket_closed: bool = False
+    last_bucket_z: float | None = None
 
     def __post_init__(self) -> None:
         self.buckets = RollingWindow(window_ms=self.window_s * 1000)
@@ -245,6 +251,10 @@ class VolumeProfile:
             # second — without this, the first trade after a quiet spell scored
             # 50 sigma and every calm market looked like manipulation.
             zero_is_normal=True,
+            # Traded volume is log-normal: its upper tail is orders of magnitude
+            # above the median by construction, so a linear z-score reported
+            # z=1400 for ordinary bursts. Score in log space instead.
+            log_space=True,
         )
 
     def add_trade(self, timestamp_ms: int, size: float, price: float) -> float | None:
@@ -256,6 +266,7 @@ class VolumeProfile:
         if self._current_bucket_start == 0:
             self._current_bucket_start = bucket_start
 
+        self.bucket_closed = False
         if bucket_start > self._current_bucket_start:
             z = self._close_bucket(self._current_bucket_start)
             # Account for silent gaps: empty buckets are real zero-volume samples.
@@ -277,6 +288,8 @@ class VolumeProfile:
         vol = self._current_bucket_volume
         self.buckets.add(ts, vol)
         z = self.zscore.update(vol, ts)
+        self.last_bucket_z = z
+        self.bucket_closed = True
         if z is not None:
             self.cusum.update(clamp(z, -10, 10))
         return z
@@ -445,11 +458,20 @@ class MicrostructureState:
         )
         self.cvd = CVDTracker(symbol=self.symbol, venue=self.venue, window_s=self.cvd_window_s)
 
-    def on_trade(self, timestamp_ms: int, price: float, size: float, side: Side) -> float | None:
+    def on_trade(
+        self, timestamp_ms: int, price: float, size: float, side: Side
+    ) -> tuple[bool, float | None]:
+        """Apply a trade. Returns ``(bucket_closed, z_score_or_None)``.
+
+        The two are independent: a bucket always closes on schedule, but the
+        z-score is ``None`` whenever the estimator cannot make a defensible
+        claim about dispersion.
+        """
         self.trades_seen += 1
         self.last_price = price
         self.cvd.add_trade(timestamp_ms, size, price, side)
-        return self.volume.add_trade(timestamp_ms, size, price)
+        z = self.volume.add_trade(timestamp_ms, size, price)
+        return self.volume.bucket_closed, z
 
     def snapshot(self) -> dict[str, float]:
         obi = self.book.imbalance()

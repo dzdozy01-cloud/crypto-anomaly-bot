@@ -480,18 +480,26 @@ class TestSparseSeriesZScore:
         assert z is not None and abs(z) > 10
 
     def test_volume_profile_bounded_on_sparse_data(self):
+        """Realistic bursty (log-normal) volume must not produce absurd z."""
+        import random
+
         from cadb.core.schema import now_ms
         from cadb.modules.exchange.microstructure import VolumeProfile
 
+        rng = random.Random(3)
         vp = VolumeProfile(symbol="X/Y", venue="v", window_s=300, bucket_s=5)
         t = (now_ms() // 5000) * 5000
         seen = []
-        for i in range(60):
-            z = vp.add_trade(t + i * 5000, 0.0001 if i % 7 else 1.0, 100.0)
+        for i in range(300):
+            v = rng.lognormvariate(0, 1.6) if rng.random() > 0.25 else 0.0001
+            z = vp.add_trade(t + i * 5000, v, 60000.0)
             if z is not None:
                 seen.append(z)
-        assert seen, "expected some z-scores"
-        assert max(abs(z) for z in seen) < 20, f"absurd z on sparse data: {max(seen)}"
+        assert seen, "expected some z-scores on a dispersed series"
+        worst = max(abs(z) for z in seen)
+        assert worst < 20, f"absurd z on ordinary bursty volume: {worst}"
+        flagged = sum(1 for z in seen if vp.exceeds_threshold(z))
+        assert flagged / len(seen) < 0.10, f"{flagged}/{len(seen)} false spikes"
 
     def test_genuine_spike_still_detected(self):
         """Guard against over-correcting into missed detections."""

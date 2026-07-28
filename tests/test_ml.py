@@ -365,3 +365,43 @@ class TestTrainingData:
         X, y, names = generate_labelled_set(200, 30, seed=3)
         assert len(X) == len(y) == len(names)
         assert 0 < y.sum() < len(y)
+
+
+class TestQuietMarketDoesNotAlert:
+    """Regression: ordinary market activity scored 82 and alerted continuously.
+
+    Production symptom (2026-07): a steady stream of `MANIPULATION BTC
+    score=82.0` on nothing but normal exchange flow, driven by log-normal volume
+    producing z-scores of 800-1400.
+    """
+
+    @pytest.fixture(scope="class")
+    def clf(self):
+        c = ManipulationClassifier(n_estimators=100, min_training_samples=100)
+        c.fit(generate_training_data(3000, 0.02, seed=42))
+        return c
+
+    def test_exchange_only_directional_flow_is_quiet(self, clf):
+        """One-sided flow with mild divergence is ordinary, not manipulation."""
+        b = clf.score(_fv(cvd_z=-2.7, cvd_divergence=0.42, volume_z=-1.46,
+                          spread_bps=0.69, obi_z=0.45))
+        assert b.composite < 40, f"quiet market scored {b.composite:.1f}"
+
+    def test_moderate_volume_burst_alone_is_quiet(self, clf):
+        b = clf.score(_fv(volume_z=3.2, volume_spike_ratio=4.0, spread_bps=1.2,
+                          obi=0.15, obi_abs=0.15, obi_z=0.8, cvd_z=1.1))
+        assert b.composite < 60, f"a lone volume burst scored {b.composite:.1f}"
+
+    def test_lopsided_book_alone_is_quiet(self, clf):
+        """Books are often lopsided; that alone must not alert."""
+        b = clf.score(_fv(obi=0.72, obi_abs=0.72, obi_z=2.2, spread_bps=1.0))
+        assert b.composite < 80, f"lopsided book alone scored {b.composite:.1f}"
+
+    def test_real_multi_source_pump_still_fires(self, clf):
+        """Guard against over-suppression."""
+        b = clf.score(_fv(volume_z=6.0, volume_spike_ratio=9.0, obi=0.68,
+                          obi_abs=0.68, obi_z=4.5, cvd_z=4.2, cvd_divergence=-0.55,
+                          mention_z=5.5, mention_accel=0.8, sentiment=0.75,
+                          sentiment_abs=0.75, bot_farm_score=0.82,
+                          wall_activity=1.4))
+        assert b.composite >= 80, f"genuine pump only scored {b.composite:.1f}"

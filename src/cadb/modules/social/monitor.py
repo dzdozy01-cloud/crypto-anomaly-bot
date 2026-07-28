@@ -58,6 +58,7 @@ class TickerState:
         self.mention_z = DynamicZScore(
             half_life_s=self.window_s / 2, window=240, warmup=15, base_threshold=3.0,
             zero_is_normal=True,  # silence is ordinary for most tickers
+            log_space=True,       # mention counts are heavy-tailed
         )
         self.sentiment_window = RollingWindow(window_ms=self.window_s * 1000)
         self.sentiment_z = DynamicZScore(

@@ -138,10 +138,16 @@ class EWMAZScore:
 
     half_life_s: float = 60.0
     warmup: int = 20
+    log_space: bool = False  # see RobustZScore.log_space
     mean: float = 0.0
     var: float = 0.0
     count: int = 0
     _last_ts: int | None = field(default=None, repr=False)
+
+    def _tx(self, value: float) -> float:
+        if not self.log_space:
+            return value
+        return math.log1p(max(value, 0.0))
 
     def _alpha(self, dt_s: float) -> float:
         if self.half_life_s <= 0:
@@ -151,6 +157,7 @@ class EWMAZScore:
     def update(self, value: float, timestamp_ms: int | None = None) -> float | None:
         """Feed a sample; returns the z-score *before* the update (leak-free)."""
         z = self.score(value)
+        value = self._tx(value)
         dt_s = 1.0
         if timestamp_ms is not None and self._last_ts is not None:
             dt_s = max(0.0, (timestamp_ms - self._last_ts) / 1000.0)
@@ -178,7 +185,7 @@ class EWMAZScore:
         sd = self.std
         if sd <= 1e-12:
             return 0.0
-        return (value - self.mean) / sd
+        return (self._tx(value) - self.mean) / sd
 
 
 @dataclass
@@ -195,13 +202,24 @@ class RobustZScore:
     # True for count/volume series where zeros are ordinary; False for prices,
     # where a flat series that suddenly moves is genuinely significant.
     zero_is_normal: bool = False
+    # Score in log1p space. Traded volume, order sizes and mention counts are
+    # log-normally distributed over positive support: their upper tail sits
+    # orders of magnitude above the median *by construction*, so a linear
+    # z-score reports z=400+ for entirely ordinary bursts. Log-space restores
+    # the symmetry that a z-score assumes.
+    log_space: bool = False
     _buf: deque[float] = field(default_factory=deque, repr=False)
 
     _MAD_TO_SIGMA = 1.4826
 
+    def _tx(self, value: float) -> float:
+        if not self.log_space:
+            return value
+        return math.log1p(max(value, 0.0))
+
     def update(self, value: float) -> float | None:
         z = self.score(value)
-        self._buf.append(value)
+        self._buf.append(self._tx(value))
         while len(self._buf) > self.window:
             self._buf.popleft()
         return z
@@ -210,6 +228,7 @@ class RobustZScore:
         n = len(self._buf)
         if n < self.warmup:
             return None
+        value = self._tx(value)
         ordered = sorted(self._buf)
         med = _median_sorted(ordered)
         mad = _median_sorted(sorted(abs(v - med) for v in self._buf))
@@ -271,6 +290,13 @@ class DynamicZScore:
     robust_weight: float = 0.6
     adaptive: bool = True
     zero_is_normal: bool = False
+    log_space: bool = False
+    # No legitimate market observation is 50 sigma from its own recent baseline.
+    # A value beyond this means the estimator has lost its scale (degenerate
+    # variance, warmup artefact, regime break) rather than that something
+    # extraordinary happened, so we clamp instead of propagating nonsense
+    # into the feature vector.
+    max_abs_z: float = 25.0
 
     _ewma: EWMAZScore = field(init=False, repr=False)
     _robust: RobustZScore = field(init=False, repr=False)
@@ -278,9 +304,12 @@ class DynamicZScore:
     last_z: float | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        self._ewma = EWMAZScore(half_life_s=self.half_life_s, warmup=self.warmup)
+        self._ewma = EWMAZScore(
+            half_life_s=self.half_life_s, warmup=self.warmup, log_space=self.log_space
+        )
         self._robust = RobustZScore(
-            window=self.window, warmup=self.warmup, zero_is_normal=self.zero_is_normal
+            window=self.window, warmup=self.warmup,
+            zero_is_normal=self.zero_is_normal, log_space=self.log_space,
         )
 
     def update(self, value: float, timestamp_ms: int | None = None) -> float | None:
@@ -299,11 +328,15 @@ class DynamicZScore:
         if ez is None and rz is None:
             return None
         if rz is None:
-            return ez
+            # The robust estimator abstained (no usable dispersion). For a
+            # zero-heavy series the EWMA is equally uninformative, so trusting
+            # it alone would reintroduce the very false positives abstention
+            # exists to prevent.
+            return None if self.zero_is_normal else ez
         if ez is None:
-            return rz
+            return clamp(rz, -self.max_abs_z, self.max_abs_z)
         w = clamp(self.robust_weight, 0.0, 1.0)
-        return w * rz + (1 - w) * ez
+        return clamp(w * rz + (1 - w) * ez, -self.max_abs_z, self.max_abs_z)
 
     @property
     def threshold(self) -> float:
