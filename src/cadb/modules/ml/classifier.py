@@ -394,6 +394,31 @@ class ManipulationClassifier:
         return True
 
     # ---- inference -------------------------------------------------------
+    def ml_scores_batch(self, rows: list[list[float]]) -> list[float]:
+        """Score many vectors in one forest call.
+
+        ``IsolationForest.score_samples`` costs ~10.4 ms regardless of whether
+        it is given 1 row or 100 — essentially all of it fixed per-call
+        overhead. Scoring assets one at a time therefore made cycle latency
+        scale linearly with the tracked universe (15 assets ≈ 160 ms, 100 ≈ 1 s)
+        and blew the 200 ms budget as soon as discovery started adding pairs.
+        One batched call is O(1) in that overhead.
+        """
+        if not rows:
+            return []
+        if self.model is None or self.scaler_mean is None or self._calibration is None:
+            return [0.0] * len(rows)
+        x = np.nan_to_num(
+            np.asarray(rows, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        xs = (x - self.scaler_mean) / self.scaler_scale
+        raw = self.model.score_samples(xs)
+        p50, p01 = self._calibration
+        span = p50 - p01
+        if span <= 1e-9:
+            return [0.0] * len(rows)
+        return [clamp((p50 - r) / span * 100.0, 0.0, 100.0) for r in raw]
+
     def _ml_score(self, values: list[float]) -> float:
         """Calibrated 0-100 anomaly score from the forest."""
         if self.model is None or self.scaler_mean is None or self._calibration is None:
@@ -436,11 +461,16 @@ class ManipulationClassifier:
             return Severity.LOW
         return Severity.INFO
 
-    def score(self, fv: FeatureVector) -> ScoreBreakdown:
-        """Compute the composite 0-100 Manipulation Score."""
+    def score(self, fv: FeatureVector, ml_score: float | None = None) -> ScoreBreakdown:
+        """Compute the composite 0-100 Manipulation Score.
+
+        ``ml_score`` may be supplied by :meth:`ml_scores_batch` to avoid a
+        per-asset forest call on the hot path.
+        """
         self.scored += 1
         rule_score, contributions, reasons = self.rules.evaluate(fv)
-        ml_score = self._ml_score(fv.values) if self.is_trained else 0.0
+        if ml_score is None:
+            ml_score = self._ml_score(fv.values) if self.is_trained else 0.0
 
         if not self.is_trained:
             composite = rule_score
@@ -486,9 +516,12 @@ class ManipulationClassifier:
             severity=self._severity(composite),
         )
 
-    def classify(self, fv: FeatureVector, venue: str = "aggregate") -> AnomalySignal:
+    def classify(
+        self, fv: FeatureVector, venue: str = "aggregate",
+        ml_score: float | None = None,
+    ) -> AnomalySignal:
         """Score a vector and wrap it in an :class:`AnomalySignal`."""
-        breakdown = self.score(fv)
+        breakdown = self.score(fv, ml_score=ml_score)
         top = sorted(
             (
                 (name, val)

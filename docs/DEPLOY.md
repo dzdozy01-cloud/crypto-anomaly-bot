@@ -325,6 +325,17 @@ literally, so `SOLANA_RPC_URL="https://..."` yields an invalid URL. Remove any
 quotes, then verify with `docker compose exec cadb cadb validate -c config.yaml`
 — it prints `[keyed]` or `[public — rate limited]` per chain.
 
+**`NotSupported: kraken watchOrderBook accepts limit values of 10, 25, …`** —
+fixed. Each venue's WebSocket depth constraints are now in `VENUE_WS_QUIRKS`.
+
+**`AuthenticationError: okx watchOrderBook requires authentication`** — fixed,
+and **no API key is needed**. OKX defaults to the `books5` channel which it
+treats as authenticated; the client now requests the public `books` channel.
+
+**`BadSymbol: kraken does not have market symbol PEPE/USDT`** — fixed. Markets
+are loaded per venue at startup and symbols the venue does not list are
+unsubscribed instead of retrying forever.
+
 **Exchange 451/403** — geo-block, covered above. Drop the venue or change region.
 
 **Out of memory on the micro shape** — set `social.use_finbert: false` in

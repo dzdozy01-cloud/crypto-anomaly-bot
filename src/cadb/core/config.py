@@ -103,7 +103,11 @@ class BusConfig(BaseModel):
 class ExchangeConfig(BaseModel):
     enabled: bool = True
     exchanges: list[str] = Field(default_factory=lambda: ["binance", "bybit", "okx", "bitget", "kucoin", "gate", "mexc", "kraken", "coinbase"])
-    symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+    # Symbols to watch *unconditionally*. Empty by default: pinning majors
+    # means paying attention to BTC/ETH/SOL whether or not anything is
+    # happening there, which is precisely the wrong bias — those books are far
+    # too deep to move on one actor's flow. Discovery decides what to watch.
+    symbols: list[str] = Field(default_factory=list)
     orderbook_depth: int = 50
     volume_window_s: int = 300          # 5-minute rolling volume window
     volume_bucket_s: int = 5            # bucket size for volume aggregation
@@ -123,9 +127,11 @@ class ExchangeConfig(BaseModel):
     discovery_enabled: bool = True
     discovery_interval_s: int = 300     # rescan cadence
     discovery_max_symbols: int = 20     # per venue, on top of `symbols`
+    # Universe scanned per venue when `symbols` is empty. Discovery ranks the
+    # whole venue, so this only bounds the WebSocket count, not the scan.
     discovery_min_volume_usd: float = 100_000.0   # below this is noise
     discovery_max_volume_usd: float = 50_000_000.0  # above this is not cheaply moved
-    discovery_min_change_pct: float = 15.0        # |24h move| to qualify
+    discovery_min_change_pct: float = 25.0        # |24h move| to qualify (massive only)
     discovery_volume_surge: float = 3.0           # x median volume to qualify
 
     # New-listing tracking. Freshly listed tokens are the highest-risk category:
@@ -224,7 +230,7 @@ class MLConfig(BaseModel):
     retrain_interval_s: int = 3600
     online_training: bool = True
     feature_ttl_s: int = 600            # how long a module's feature stays fresh
-    score_interval_ms: int = 250        # scoring cadence per asset
+    score_interval_ms: int = 500        # scoring cadence (universe-wide sweep)
     alert_threshold: float = 80.0       # composite score > 80 fires an alert
     weights: dict[str, float] = Field(
         default_factory=lambda: {

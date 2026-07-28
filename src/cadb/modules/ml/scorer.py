@@ -58,6 +58,7 @@ class MLScorer(Module):
         self.last_scores: dict[str, float] = {}
         self._urgent: set[str] = set()
         self._lock = asyncio.Lock()
+        self._yield_every = 8  # cooperative yield cadence inside a scoring cycle
         self._last_alert_log: dict[str, float] = {}
         self._alert_log_interval_s = 60.0
 
@@ -144,19 +145,35 @@ class MLScorer(Module):
         if not vectors:
             return
 
-        for fv in vectors:
-            if not fv.is_informative:
-                continue
+        # Yield to the event loop periodically. Discovery can push the tracked
+        # universe into the hundreds, and scoring every asset synchronously —
+        # each with an IsolationForest call — starved the WebSocket readers and
+        # pushed cycle p95 past the 200ms budget. Scoring is cooperative now, so
+        # cycle duration grows with the universe but tick handling does not stall.
+        # One forest call for the whole sweep instead of one per asset.
+        live = [fv for fv in vectors if fv.is_informative]
+        ml_scores = (
+            self.classifier.ml_scores_batch([fv.values for fv in live])
+            if self.classifier.is_trained else [0.0] * len(live)
+        )
+
+        scored = 0
+        for i, (fv, ml) in enumerate(zip(live, ml_scores)):
             self.classifier.observe(fv)
-            signal = self.classifier.classify(fv)
+            signal = self.classifier.classify(fv, ml_score=ml)
             self.last_scores[fv.asset] = signal.score
             METRICS.gauge(f"ml.score.{fv.asset}", round(signal.score, 2))
+            scored += 1
 
             if signal.score >= 40 or fv.asset in urgent:
                 await self._dispatch(signal, t0)
 
+            if (i + 1) % self._yield_every == 0:
+                await asyncio.sleep(0)
+
         METRICS.observe("ml.cycle_ms", (monotonic_ns() - t0) / 1e6)
         METRICS.gauge("ml.assets_tracked", len(vectors))
+        METRICS.gauge("ml.assets_scored", scored)
 
     async def _dispatch(self, signal: AnomalySignal, t0: int) -> None:
         latency = (monotonic_ns() - t0) / 1e6

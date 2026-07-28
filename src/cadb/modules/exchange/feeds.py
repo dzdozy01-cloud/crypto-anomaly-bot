@@ -85,6 +85,28 @@ class ExchangeFeed(ABC):
         self.connected = False
 
 
+# Per-venue WebSocket quirks, all verified live against ccxt 4.5.
+#
+# `limit` — the depth argument watch_order_book will accept. Kraken rejects
+#   anything outside {10,25,100,500,1000} with NotSupported; several venues
+#   ignore the argument entirely and stream a fixed book, so None means
+#   "call without a limit and take whatever the venue sends".
+# `options` — constructor options needed for *public* access. OKX defaults to
+#   the `books5` channel, which it treats as authenticated; `books` is the free
+#   public feed and needs no credentials.
+VENUE_WS_QUIRKS: dict[str, dict[str, Any]] = {
+    "kraken": {"limit": 25},                       # must be 10/25/100/500/1000
+    "okx": {"limit": None, "options": {"depth": "books"}},  # books5 needs auth
+    "bitget": {"limit": None},
+    "kucoin": {"limit": None},
+    "coinbase": {"limit": None},
+    "gate": {"limit": 20},
+    "mexc": {"limit": 20},
+    "binance": {"limit": 20},
+    "bybit": {"limit": 50},
+}
+
+
 class CCXTProFeed(ExchangeFeed):
     """CCXT Pro WebSocket feed (the production path).
 
@@ -97,6 +119,7 @@ class CCXTProFeed(ExchangeFeed):
     def __init__(self, venue: str, symbols: list[str], depth: int = 50) -> None:
         super().__init__(venue, symbols, depth)
         self._client: Any = None
+        self._ws_limit: int | None = depth
 
     def _ensure_client(self) -> Any:
         if self._client is not None:
@@ -107,20 +130,30 @@ class CCXTProFeed(ExchangeFeed):
             raise RuntimeError("ccxt>=4 required for CCXTProFeed") from exc
         if not hasattr(ccxtpro, self.venue):
             raise ValueError(f"ccxt.pro has no exchange '{self.venue}'")
+        quirks = VENUE_WS_QUIRKS.get(self.venue, {})
+        options: dict[str, Any] = {"defaultType": "spot"}
+        options.update(quirks.get("options", {}))
         self._client = getattr(ccxtpro, self.venue)(
             {
                 "enableRateLimit": True,
                 "newUpdates": True,
-                "options": {"defaultType": "spot"},
+                "options": options,
             }
         )
+        # None => omit the limit argument entirely (venue streams a fixed book).
+        self._ws_limit = quirks.get("limit", self.depth)
         self.connected = True
         return self._client
 
     async def watch_order_book(self, symbol: str) -> AsyncIterator[OrderBookUpdate]:
         client = self._ensure_client()
+        limit = getattr(self, "_ws_limit", self.depth)
         while True:
-            book = await client.watch_order_book(symbol, limit=self.depth)
+            book = (
+                await client.watch_order_book(symbol, limit=limit)
+                if limit is not None
+                else await client.watch_order_book(symbol)
+            )
             self.messages += 1
             yield OrderBookUpdate(
                 venue=self.venue,

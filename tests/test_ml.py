@@ -600,3 +600,61 @@ class TestBenchmarkHonesty:
 
         doc = (training.__doc__ or "").lower()
         assert "synthetic" in doc
+
+
+class TestBatchedScoring:
+    """Regression: per-asset forest calls blew the latency budget.
+
+    `IsolationForest.score_samples` costs ~10.4 ms whether given 1 row or 100 —
+    almost entirely fixed overhead. Scoring assets individually made cycle
+    latency scale linearly with the tracked universe, so discovery adding pairs
+    pushed p95 to 249 ms against a 200 ms budget.
+    """
+
+    @pytest.fixture(scope="class")
+    def clf(self):
+        c = ManipulationClassifier(n_estimators=100, min_training_samples=100)
+        c.fit(generate_training_data(2000, 0.02, seed=42))
+        return c
+
+    def test_batch_matches_individual_scores(self, clf):
+        import random
+
+        rng = random.Random(3)
+        rows = [[rng.gauss(0, 1) for _ in FEATURE_NAMES] for _ in range(25)]
+        batched = clf.ml_scores_batch(rows)
+        individual = [clf._ml_score(r) for r in rows]
+        assert len(batched) == len(rows)
+        for b, i in zip(batched, individual):
+            assert abs(b - i) < 0.01, "batched scoring must be numerically identical"
+
+    def test_batch_is_sublinear(self, clf):
+        import time
+
+        rows = [[0.5] * len(FEATURE_NAMES) for _ in range(100)]
+        t0 = time.perf_counter()
+        clf.ml_scores_batch(rows)
+        batched_ms = (time.perf_counter() - t0) * 1000
+
+        t0 = time.perf_counter()
+        for r in rows[:10]:
+            clf._ml_score(r)
+        per_call_ms = (time.perf_counter() - t0) * 1000 / 10
+
+        assert batched_ms < per_call_ms * 20, (
+            f"batch of 100 took {batched_ms:.1f}ms vs {per_call_ms:.1f}ms/call — "
+            "batching is not amortising the forest overhead"
+        )
+
+    def test_empty_batch_safe(self, clf):
+        assert clf.ml_scores_batch([]) == []
+
+    def test_untrained_batch_returns_zeros(self):
+        c = ManipulationClassifier()
+        assert c.ml_scores_batch([[0.0] * len(FEATURE_NAMES)] * 3) == [0.0, 0.0, 0.0]
+
+    def test_classify_accepts_precomputed_ml_score(self, clf):
+        fv = _fv(volume_z=5.0, obi=0.6, obi_abs=0.6)
+        a = clf.classify(fv)
+        b = clf.classify(fv, ml_score=clf._ml_score(fv.values))
+        assert abs(a.score - b.score) < 0.01

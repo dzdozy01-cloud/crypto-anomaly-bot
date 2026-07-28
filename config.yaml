@@ -15,12 +15,12 @@ exchange:
   # ccxt.pro ids. Note: 'gate' (not gateio), 'coinbase' (Advanced Trade).
   # Robinhood has no public market-data WebSocket and cannot be supported.
   exchanges: [binance, bybit, okx, bitget, kucoin, gate, mexc, kraken, coinbase]
-  symbols:
-    - BTC/USDT
-    - ETH/USDT
-    - SOL/USDT
-    - PEPE/USDT
-    - DOGE/USDT
+  # Pinned symbols — watched unconditionally, even when quiet.
+  # DELIBERATELY EMPTY. Pinning majors produced constant alerts on BTC/ETH/SOL
+  # while ignoring the low-cap pairs where manipulation actually happens.
+  # Discovery scans every listed pair on every venue and subscribes only what
+  # is genuinely anomalous. Add a symbol here only to force-watch it.
+  symbols: []
   orderbook_depth: 50               # L2 levels requested from the venue
   obi_depth_levels: 20              # levels aggregated into the OBI
   obi_threshold: 0.35               # |OBI| beyond this is a lopsided book
@@ -40,7 +40,7 @@ exchange:
   discovery_max_symbols: 20         # per venue
   discovery_min_volume_usd: 100000  # ignore illiquid noise
   discovery_max_volume_usd: 50000000 # ignore majors (too deep to move)
-  discovery_min_change_pct: 15      # |24h change| to qualify (pump OR dump)
+  discovery_min_change_pct: 25      # |24h change| to qualify — MASSIVE moves only
   discovery_volume_surge: 3.0       # x median volume to qualify
 
   # Newly listed tokens are watched unconditionally for a grace period —
@@ -105,7 +105,7 @@ ml:
   retrain_interval_s: 3600          # online retraining cadence
   online_training: true
   feature_ttl_s: 600                # how long a module's feature stays fresh
-  score_interval_ms: 250            # scoring cadence per asset
+  score_interval_ms: 500            # scoring cadence (universe-wide sweep)
   alert_threshold: 80               # composite score > 80 fires an alert
   ml_blend: 0.5                     # 0 = pure rules, 1 = pure IsolationForest
   weights:                          # module weighting in the composite score

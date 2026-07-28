@@ -45,6 +45,10 @@ class ExchangeEngine(Module):
         self.discovery: dict[str, SymbolDiscovery] = {}
         self.watched: dict[str, set[str]] = {}   # venue -> currently streamed symbols
         self._stream_tasks: dict[tuple[str, str], list[Any]] = {}
+        # venue -> set of symbols the venue actually lists (None until loaded).
+        # Subscribing to a pair a venue does not trade produces an endless
+        # BadSymbol reconnect loop, so markets are checked before subscribing.
+        self._valid_symbols: dict[str, set[str] | None] = {}
 
     # ---- state ---------------------------------------------------------
     def state_for(self, venue: str, symbol: str) -> MicrostructureState:
@@ -80,6 +84,7 @@ class ExchangeEngine(Module):
                 continue
             self.feeds[venue] = feed
             self.watched[venue] = set()
+            self._valid_symbols[venue] = None  # populated lazily on first check
             for symbol in self.config.symbols:
                 self._subscribe(venue, symbol)
 
@@ -98,6 +103,8 @@ class ExchangeEngine(Module):
                 )
 
         self.spawn("bucket-flusher", self._flush_loop())
+        if not self.config.simulate:
+            self.spawn("market-validation", self._validate_loop())
         if self.discovery:
             self.spawn("discovery", self._discovery_loop())
         self.log.info(
@@ -138,10 +145,19 @@ class ExchangeEngine(Module):
         # rather than inheriting a stale distribution.
         self.states.pop((venue, symbol), None)
 
+    async def _validate_loop(self) -> None:
+        """One-shot market validation a few seconds after startup."""
+        await asyncio.sleep(5)
+        with contextlib.suppress(Exception):
+            await self._prune_unlisted()
+
     async def _discovery_loop(self) -> None:
-        """Periodically re-rank each venue and adjust subscriptions."""
-        # Let the pinned symbols establish themselves before adding more.
-        await asyncio.sleep(10)
+        """Periodically re-rank each venue and adjust subscriptions.
+
+        Runs immediately rather than after a delay: with no pinned symbols
+        there is nothing to watch until the first scan completes, so a startup
+        sleep would mean a blind window.
+        """
         while True:
             for venue, disco in list(self.discovery.items()):
                 try:
@@ -174,6 +190,49 @@ class ExchangeEngine(Module):
             self.log.info("💤 stopped watching %s %s", venue, symbol)
 
         METRICS.gauge(f"exchange.{venue}.watched", len(self.watched.get(venue, set())))
+
+    async def _load_markets(self, venue: str) -> set[str]:
+        """Fetch and cache the symbols a venue actually lists."""
+        cached = self._valid_symbols.get(venue)
+        if cached is not None:
+            return cached
+        feed = self.feeds.get(venue)
+        client = getattr(feed, "_client", None) or (
+            feed._ensure_client() if hasattr(feed, "_ensure_client") else None
+        )
+        if client is None or not hasattr(client, "load_markets"):
+            self._valid_symbols[venue] = set()
+            return set()
+        try:
+            markets = await client.load_markets()
+            valid = {
+                sym for sym, m in markets.items()
+                if m.get("spot") and m.get("active") is not False
+            }
+        except Exception as exc:
+            self.log.warning("%s: could not load markets (%s)", venue, exc)
+            valid = set()
+        self._valid_symbols[venue] = valid
+        return valid
+
+    async def _prune_unlisted(self) -> None:
+        """Drop pinned symbols a venue does not actually trade.
+
+        Without this, every venue is subscribed to every configured symbol and
+        the ones that do not exist there (PEPE/USDT on Kraken or Coinbase, for
+        example) fail with BadSymbol forever, retrying on the backoff ladder and
+        drowning the log.
+        """
+        for venue in list(self.feeds):
+            valid = await self._load_markets(venue)
+            if not valid:
+                continue
+            for symbol in sorted(self.watched.get(venue, set())):
+                if symbol not in valid:
+                    await self._unsubscribe(venue, symbol)
+                    self.log.info(
+                        "%s does not list %s — unsubscribed", venue, symbol
+                    )
 
     def _make_book_loop(self, feed: ExchangeFeed, symbol: str) -> Any:
         async def loop() -> None:

@@ -800,3 +800,61 @@ class TestNewListingTracking:
         for v in ("binance", "bybit", "okx", "bitget", "kucoin",
                   "gate", "mexc", "kraken", "coinbase"):
             assert hasattr(ccxtpro, v), f"{v} not in ccxt.pro"
+
+
+class TestVenueCompatibility:
+    """Regression: three venues failed permanently on their own WS quirks."""
+
+    def test_quirks_cover_every_default_venue(self):
+        from cadb.core.config import Settings
+        from cadb.modules.exchange.feeds import VENUE_WS_QUIRKS
+
+        for venue in Settings().exchange.exchanges:
+            assert venue in VENUE_WS_QUIRKS, f"{venue} has no WS quirk entry"
+
+    def test_kraken_limit_is_quantized(self):
+        """Kraken rejects any depth outside {10,25,100,500,1000}."""
+        from cadb.modules.exchange.feeds import VENUE_WS_QUIRKS
+
+        assert VENUE_WS_QUIRKS["kraken"]["limit"] in (10, 25, 100, 500, 1000)
+
+    def test_okx_uses_public_book_channel(self):
+        """`books5` is treated as authenticated; `books` is the public feed."""
+        from cadb.modules.exchange.feeds import VENUE_WS_QUIRKS
+
+        assert VENUE_WS_QUIRKS["okx"]["options"]["depth"] == "books"
+
+    def test_feed_applies_quirks_to_client(self):
+        from cadb.modules.exchange.feeds import CCXTProFeed
+
+        pytest.importorskip("ccxt.pro")
+        feed = CCXTProFeed("kraken", ["BTC/USDT"], depth=50)
+        feed._ensure_client()
+        assert feed._ws_limit == 25, "kraken must not receive depth=50"
+        okx = CCXTProFeed("okx", ["BTC/USDT"], depth=50)
+        okx._ensure_client()
+        assert okx._ws_limit is None
+        assert okx._client.options["depth"] == "books"
+
+
+class TestNoPinnedMajors:
+    def test_default_symbols_is_empty(self):
+        """Pinning majors caused constant BTC/ETH/SOL alerts."""
+        from cadb.core.config import Settings
+
+        assert Settings().exchange.symbols == [], (
+            "pinned symbols force-watch quiet majors; discovery should decide"
+        )
+
+    def test_shipped_config_pins_nothing(self):
+        from pathlib import Path
+
+        from cadb.core.config import load_settings
+
+        cfg = Path(__file__).resolve().parent.parent / "config.yaml"
+        assert load_settings(cfg).exchange.symbols == []
+
+    def test_discovery_threshold_targets_massive_moves(self):
+        from cadb.core.config import Settings
+
+        assert Settings().exchange.discovery_min_change_pct >= 25.0
