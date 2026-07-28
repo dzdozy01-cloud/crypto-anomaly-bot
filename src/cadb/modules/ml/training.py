@@ -8,6 +8,26 @@ with live data as it accumulates.
 
 The generator is also what the test-suite uses to assert detection quality:
 labelled anomalies let us measure precision/recall rather than eyeballing.
+
+.. warning::
+   **This benchmark is circular and must not be cited as accuracy.**
+
+   ``_apply_scenario`` below and ``RuleEngine`` in :mod:`~cadb.modules.ml.classifier`
+   were written by the same author against the same feature names and thresholds.
+   The pump scenario emits ``volume_z ∈ [3.5, 12]`` precisely because the rule
+   fires above 3.0. Scoring well here demonstrates internal consistency, nothing
+   more.
+
+   Measured: four OR'd numpy thresholds reach F1 ≈ 0.92 on this set against the
+   full 20-feature pipeline's ≈ 0.95. When a trivial baseline nearly matches the
+   system, the benchmark is measuring the generator.
+
+   Legitimate uses: regression testing during refactors (it has caught several
+   real defects), cold-start for the IsolationForest, and making domain
+   assumptions explicit. It is **not** external validation. To validate properly,
+   record live telemetry with :class:`~cadb.backtest.EventRecorder`, label known
+   incidents (CFTC/SEC cases, exchange delistings, documented rug-pulls), and
+   replay with ``cadb backtest``.
 """
 
 from __future__ import annotations

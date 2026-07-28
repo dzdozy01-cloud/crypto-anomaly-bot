@@ -534,3 +534,69 @@ class TestNoAlertsOnStableMajors:
         b = clf.score(self._exch(cvd_z=-4.0, volume_z=-2.0,
                                  obi=0.1, obi_abs=0.1, spread_bps=1.0))
         assert not any("one-sided aggression" in r for r in b.reasons)
+
+
+class TestBenchmarkHonesty:
+    """Guard the *claims*, not just the code.
+
+    The synthetic benchmark is circular: `generate_labelled_set` and
+    `RuleEngine` share an author, feature names and thresholds. These tests
+    exist so that circularity stays documented and measurable rather than
+    quietly hardening into a marketing number.
+    """
+
+    def test_trivial_baseline_is_competitive(self):
+        """The evidence for circularity. If this ever fails, re-examine why.
+
+        Four numpy thresholds reach ~F1 0.92 against the full 20-feature
+        pipeline's ~0.95. A benchmark a trivial detector nearly wins is
+        measuring the generator, not detection skill.
+        """
+        import numpy as np
+
+        from cadb.modules.ml.features import FEATURE_NAMES
+
+        X, y, _ = generate_labelled_set(600, 80, seed=11)
+        fi = {n: i for i, n in enumerate(FEATURE_NAMES)}
+        pred = (
+            (X[:, fi["volume_z"]] > 2.5)
+            | (np.abs(X[:, fi["obi"]]) > 0.3)
+            | (X[:, fi["bot_farm_score"]] > 0.5)
+            | (X[:, fi["liquidity_drop"]] > 0.3)
+        )
+        tp = int((pred & (y == 1)).sum())
+        fp = int((pred & (y == 0)).sum())
+        fn = int((~pred & (y == 1)).sum())
+        precision = tp / (tp + fp)
+        recall = tp / (tp + fn)
+        f1 = 2 * precision * recall / (precision + recall)
+        assert f1 > 0.85, (
+            "A trivial baseline should still score highly on this synthetic set. "
+            "If it no longer does, the generator changed and the honesty "
+            "documentation in the README needs revisiting."
+        )
+
+    def test_evaluate_output_carries_the_caveat(self):
+        """The headline number must never be printed without its disclaimer."""
+        from pathlib import Path
+
+        cli = (Path(__file__).resolve().parent.parent
+               / "src" / "cadb" / "cli.py").read_text()
+        assert "SYNTHETIC BENCHMARK" in cli
+        assert "not real-world" in cli or "not real-world\\n" in cli
+        assert "baseline (sanity check)" in cli, "baselines must be shown inline"
+
+    def test_readme_does_not_claim_validated_accuracy(self):
+        from pathlib import Path
+
+        readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+        assert "circular" in readme.lower(), "the limitation must be stated plainly"
+        assert "not evidence of a trading edge" in readme.lower()
+        # The trivial-baseline table is the proof; it must stay.
+        assert "0.921" in readme or "four thresholds" in readme.lower()
+
+    def test_training_module_documents_its_own_limits(self):
+        from cadb.modules.ml import training
+
+        doc = (training.__doc__ or "").lower()
+        assert "synthetic" in doc
