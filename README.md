@@ -34,7 +34,7 @@ CADB's job is to correlate them.
 
 **Measured on the labelled evaluation set** (`cadb evaluate`) at the score > 80
 alert threshold: **precision 0.99, recall 0.93, F1 0.955**. Scoring latency
-**p95 ≈ 65 ms**, well inside the 200 ms budget. 232 tests passing.
+**p95 ≈ 65 ms**, well inside the 200 ms budget. 241 tests passing.
 
 ---
 
@@ -88,7 +88,7 @@ geo-blocking: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 ### Module 1 — Exchange Anomaly Engine
 L2 order books and raw trades over WebSocket via CCXT Pro across **Binance,
-Bybit, MEXC, Gate.io, KuCoin and Coinbase**, with hand-rolled native WS clients
+Bybit, OKX, Bitget, KuCoin, Gate.io, MEXC, Kraken and Coinbase**, with hand-rolled native WS clients
 as a fallback. Any ccxt.pro exchange id works; an unsupported venue is rejected
 loudly rather than silently simulated.
 
@@ -112,9 +112,22 @@ deep to move on one actor's flow; a three-day-old meme coin with $400k of
 liquidity is where pumps and dumps actually happen. Every 5 minutes each venue's
 full universe is ranked by 24h move (direction-agnostic — a −55% dump scores like
 a +55% pump), volume surge versus its own median, and new-listing status, with a
-liquidity band that filters out both illiquid noise and unmovable majors. On a
-live MEXC scan of 2,124 pairs this surfaced 8 dumps and 12 pumps that a static
-list would have missed entirely.
+liquidity band that filters out both illiquid noise and unmovable majors. A live scan across seven
+reachable venues covered **10,415 pairs and surfaced 58 anomalies** a static list
+would have missed — including the same token at +712% on one venue and +95% on
+another.
+
+**Newly listed tokens** are watched unconditionally for a 48-hour grace period at
+a lower liquidity floor, because the abnormal move usually arrives minutes to
+hours *after* listing. Subscribing only once a pair is already spiking misses the
+entire run-up.
+
+**Materiality gating.** Statistical significance is not economic significance. A
+live BTC book sits at OBI +0.21 with a standard deviation of 0.03, so a routine
+drift to +0.30 is a "3.6σ event" that means nothing — yet it satisfied a pure
+z-score rule and produced several alerts per minute on a perfectly normal book.
+Order-book and CVD rules now require an absolute dislocation as well as a
+statistical one.
 
 | Metric | Definition | Catches |
 |---|---|---|
@@ -347,7 +360,7 @@ src/cadb/
 ├── bot/               telegram_bot (transport) · commands (22 handlers)
 ├── app.py             orchestrator
 └── cli.py             run · demo · train · evaluate · backtest · validate
-tests/                 232 tests
+tests/                 241 tests
 ```
 
 Analytics are deliberately separated from I/O: `microstructure.py` has no network
@@ -374,7 +387,7 @@ Capture live telemetry for later training/backtesting with `backtest.EventRecord
 ## Testing
 
 ```bash
-pytest tests/ -v                                  # 232 tests, ~2 min
+pytest tests/ -v                                  # 241 tests, ~2 min
 pytest tests/test_ml.py::TestDetectionQuality -v  # precision/recall gates
 ```
 

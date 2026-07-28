@@ -92,6 +92,9 @@ class ExchangeEngine(Module):
                     min_change_pct=self.config.discovery_min_change_pct,
                     volume_surge_ratio=self.config.discovery_volume_surge,
                     always_include=tuple(self.config.symbols),
+                    track_new_listings=self.config.track_new_listings,
+                    new_listing_grace_h=self.config.new_listing_grace_h,
+                    new_listing_min_volume_usd=self.config.new_listing_min_volume_usd,
                 )
 
         self.spawn("bucket-flusher", self._flush_loop())

@@ -102,9 +102,7 @@ class BusConfig(BaseModel):
 
 class ExchangeConfig(BaseModel):
     enabled: bool = True
-    exchanges: list[str] = Field(
-        default_factory=lambda: ["binance", "bybit", "mexc", "gate", "kucoin", "coinbase"]
-    )
+    exchanges: list[str] = Field(default_factory=lambda: ["binance", "bybit", "okx", "bitget", "kucoin", "gate", "mexc", "kraken", "coinbase"])
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
     orderbook_depth: int = 50
     volume_window_s: int = 300          # 5-minute rolling volume window
@@ -129,6 +127,15 @@ class ExchangeConfig(BaseModel):
     discovery_max_volume_usd: float = 50_000_000.0  # above this is not cheaply moved
     discovery_min_change_pct: float = 15.0        # |24h move| to qualify
     discovery_volume_surge: float = 3.0           # x median volume to qualify
+
+    # New-listing tracking. Freshly listed tokens are the highest-risk category:
+    # no price history, tiny float, and the usual venue for a pump-and-dump.
+    # They are watched unconditionally for a grace period regardless of whether
+    # they currently qualify on volume or price movement, because the abnormal
+    # move often happens minutes after listing.
+    track_new_listings: bool = True
+    new_listing_grace_h: float = 48.0             # watch this long after first seen
+    new_listing_min_volume_usd: float = 20_000.0  # lower bar than established pairs
 
 
 class OnChainConfig(BaseModel):

@@ -484,3 +484,53 @@ class TestSellOffDetection:
             volume_z=7.0, volume_spike_ratio=15.0, obi=0.1, obi_abs=0.1,
             obi_z=0.5, cvd_z=0.8, spread_bps=1.3))
         assert b.composite < 80, f"lone volume spike scored {b.composite:.1f}"
+
+
+class TestNoAlertsOnStableMajors:
+    """Regression: constant alerts on BTC/ETH/SOL from micro-variance.
+
+    A deep BTC book measured live sits at OBI +0.21 with a standard deviation of
+    0.03. A routine drift to +0.30 is therefore a "3.6-sigma event" that is
+    economically meaningless — but it satisfied the `|obi_z| > 3` rule and, at a
+    250 ms scoring cadence, produced several alerts per minute on a perfectly
+    normal book. Statistical significance is not economic significance.
+    """
+
+    @pytest.fixture(scope="class")
+    def clf(self):
+        c = ManipulationClassifier(n_estimators=100, min_training_samples=100)
+        c.fit(generate_training_data(3000, 0.02, seed=42))
+        return c
+
+    def _exch(self, **kw):
+        base = _fv(**kw)
+        return FeatureVector(
+            asset="BTC", timestamp=0, values=base.values, coverage=0.34,
+            sources_fresh={"exchange": True, "onchain": False, "social": False},
+        )
+
+    def test_live_btc_micro_variance_is_quiet(self, clf):
+        """Measured from a real MEXC BTC/USDT book."""
+        b = clf.score(self._exch(obi=0.30, obi_abs=0.30, obi_z=3.6,
+                                 volume_z=0.4, cvd_z=1.2, spread_bps=0.7))
+        assert b.composite < 40, f"stable BTC book scored {b.composite:.1f}"
+
+    def test_high_z_but_small_obi_does_not_fire(self, clf):
+        """A 6-sigma move on a book that is only 12% imbalanced is noise."""
+        b = clf.score(self._exch(obi=0.12, obi_abs=0.12, obi_z=6.0,
+                                 volume_z=0.8, cvd_z=1.0, spread_bps=0.8))
+        assert b.composite < 40
+        assert not any("book imbalance" in r for r in b.reasons)
+
+    def test_large_obi_with_high_z_still_fires(self, clf):
+        """Materially lopsided AND statistically unusual must still alert."""
+        b = clf.score(self._exch(volume_z=5.0, volume_spike_ratio=8.0,
+                                 obi=-0.85, obi_abs=0.85, obi_z=-6.0,
+                                 cvd_z=-6.0, spread_bps=3.0))
+        assert b.composite >= 80
+
+    def test_cvd_z_on_dead_volume_ignored(self, clf):
+        """CVD z over a near-empty window is noise, not aggression."""
+        b = clf.score(self._exch(cvd_z=-4.0, volume_z=-2.0,
+                                 obi=0.1, obi_abs=0.1, spread_bps=1.0))
+        assert not any("one-sided aggression" in r for r in b.reasons)

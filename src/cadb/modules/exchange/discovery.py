@@ -64,10 +64,16 @@ class SymbolDiscovery:
     volume_surge_ratio: float = 3.0
     always_include: tuple[str, ...] = ()
     quote: str = "USDT"
+    track_new_listings: bool = True
+    new_listing_grace_h: float = 48.0
+    new_listing_min_volume_usd: float = 20_000.0
 
     # symbol -> rolling median 24h volume, for surge detection
     _volume_history: dict[str, list[float]] = field(default_factory=dict, repr=False)
     _known_symbols: set[str] = field(default_factory=set, repr=False)
+    # symbol -> unix ts first observed, so a new pair can be watched for a
+    # grace period even while it is still quiet.
+    _first_seen: dict[str, float] = field(default_factory=dict, repr=False)
     _first_scan: bool = True
     last_scan_ts: float = 0.0
     scans: int = 0
@@ -89,7 +95,8 @@ class SymbolDiscovery:
     def evaluate(self, tickers: dict[str, dict[str, Any]]) -> list[DiscoveredSymbol]:
         """Rank ``fetch_tickers`` output into a watchlist."""
         self.scans += 1
-        self.last_scan_ts = time.time()
+        now = time.time()
+        self.last_scan_ts = now
         candidates: list[DiscoveredSymbol] = []
         seen_now: set[str] = set()
 
@@ -106,8 +113,31 @@ class SymbolDiscovery:
             baseline = self._volume_baseline(symbol)
             self._record_volume(symbol, volume)
 
+            # Register the listing *before* the liquidity filter. Otherwise a
+            # brand-new pair is judged against the high floor on the very scan
+            # it appears, filtered out, and never recorded — so it is treated as
+            # "new" again on every subsequent scan and never actually tracked.
+            is_new = not self._first_scan and symbol not in self._known_symbols
+            if is_new and symbol not in self._first_seen:
+                self._first_seen[symbol] = now
+            age_h = (
+                (now - self._first_seen[symbol]) / 3600.0
+                if symbol in self._first_seen else None
+            )
+
             # Liquidity band: too thin is noise, too deep is not cheaply moved.
-            if volume < self.min_volume_usd or volume > self.max_volume_usd:
+            # New listings get a lower floor — they legitimately start small,
+            # and excluding them would defeat the point of tracking them.
+            recently_listed = (
+                symbol in self._first_seen
+                and (now - self._first_seen[symbol]) / 3600.0 <= self.new_listing_grace_h
+            )
+            floor = (
+                self.new_listing_min_volume_usd
+                if (recently_listed and self.track_new_listings)
+                else self.min_volume_usd
+            )
+            if volume < floor or volume > self.max_volume_usd:
                 continue
 
             reasons: list[str] = []
@@ -130,7 +160,20 @@ class SymbolDiscovery:
                     score += min(surge, 20.0) * 3
                     reasons.append(f"volume {surge:.1f}x baseline")
 
-            if not self._first_scan and symbol not in self._known_symbols:
+            # A pair inside its grace window is watched unconditionally: the
+            # abnormal move on a fresh listing usually arrives minutes-to-hours
+            # after it starts trading, so subscribing only once it is already
+            # spiking misses the entire run-up.
+            if (
+                self.track_new_listings
+                and not is_new
+                and age_h is not None
+                and age_h <= self.new_listing_grace_h
+            ):
+                score += 25
+                reasons.append(f"new listing ({age_h:.1f}h old)")
+
+            if is_new:
                 # Newly listed pairs are the highest-risk category by far: no
                 # price history, tiny float, and the usual venue for a rug. This
                 # weight deliberately exceeds the maximum any single price or

@@ -78,10 +78,21 @@ class RuleEngine:
         # OBI relative to the book's *own* history is stronger evidence than raw
         # magnitude: some pairs are structurally lopsided, and what matters is
         # the deviation from that pair's normal shape.
-        if abs(f["obi_z"]) > 3.0:
+        #
+        # But statistical significance is not economic significance. A deep BTC
+        # book sits at OBI +0.21 with a standard deviation of 0.03, so a routine
+        # drift to +0.30 is a "3-sigma event" that means nothing at all. Gating
+        # on absolute magnitude as well as z-score is what separates a genuinely
+        # lopsided book from ordinary micro-variance on a very stable one.
+        if abs(f["obi_z"]) > 3.0 and f["obi_abs"] >= 0.30:
             ex += clamp(22 * (abs(f["obi_z"]) - 3.0) / 4.0 + 8, 0, 30)
-            reasons.append(f"book imbalance {f['obi_z']:.1f}σ vs its own baseline")
-        if abs(f["cvd_z"]) > 2.5:
+            reasons.append(
+                f"book imbalance {f['obi_z']:.1f}σ vs its own baseline "
+                f"(OBI {f['obi']:+.2f})"
+            )
+        # Require the volume side to be non-trivial too: a CVD z-score computed
+        # over a near-empty window is noise, not aggression.
+        if abs(f["cvd_z"]) > 2.5 and f["volume_z"] > -0.5:
             ex += clamp(15 * (abs(f["cvd_z"]) - 2.5) / 3.0, 0, 15)
             reasons.append(f"CVD {f['cvd_z']:.1f}σ — one-sided aggression")
         if abs(f["cvd_divergence"]) > 0.4:

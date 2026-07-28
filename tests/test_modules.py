@@ -738,3 +738,65 @@ class TestVenueSupport:
 
         for venue in Settings().exchange.exchanges:
             assert hasattr(ccxtpro, venue), f"default venue {venue} unsupported"
+
+
+class TestNewListingTracking:
+    def _disco(self, **kw):
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        params = {
+            "venue": "mexc", "max_symbols": 10, "min_volume_usd": 100_000,
+            "max_volume_usd": 50_000_000, "min_change_pct": 15.0,
+            "track_new_listings": True, "new_listing_min_volume_usd": 20_000,
+        }
+        params.update(kw)
+        return SymbolDiscovery(**params)
+
+    def test_new_listing_tracked_before_it_pumps(self):
+        """The run-up is the point — subscribing after the spike is too late."""
+        d = self._disco()
+        base = {"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0}}
+        d.evaluate(base)
+        t = dict(base)
+        t["FRESH/USDT"] = {"quoteVolume": 35_000, "percentage": 3.0}
+        found = {c.symbol for c in d.evaluate(t)}
+        assert "FRESH/USDT" in found, "new listing must be watched while quiet"
+
+    def test_new_listing_below_normal_floor_still_tracked(self):
+        d = self._disco()
+        d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0}})
+        t = {
+            "OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0},
+            "TINY/USDT": {"quoteVolume": 25_000, "percentage": 1.0},
+        }
+        assert "TINY/USDT" in {c.symbol for c in d.evaluate(t)}
+
+    def test_grace_period_expires(self):
+        import time
+
+        d = self._disco(new_listing_grace_h=0.0)
+        d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0}})
+        t = {
+            "OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0},
+            "FRESH/USDT": {"quoteVolume": 35_000, "percentage": 3.0},
+        }
+        d.evaluate(t)
+        d._first_seen["FRESH/USDT"] = time.time() - 86_400  # a day ago
+        found = {c.symbol for c in d.evaluate(t)}
+        assert "FRESH/USDT" not in found, "quiet pair must drop out after grace"
+
+    def test_new_listing_that_pumps_scores_both(self):
+        d = self._disco()
+        d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0}})
+        t = {"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0},
+             "FRESH/USDT": {"quoteVolume": 35_000, "percentage": 3.0}}
+        d.evaluate(t)
+        t["FRESH/USDT"] = {"quoteVolume": 400_000, "percentage": 180.0}
+        c = next(c for c in d.evaluate(t) if c.symbol == "FRESH/USDT")
+        assert "pump" in c.reason and "new listing" in c.reason
+
+    def test_all_nine_venues_supported(self):
+        ccxtpro = pytest.importorskip("ccxt.pro")
+        for v in ("binance", "bybit", "okx", "bitget", "kucoin",
+                  "gate", "mexc", "kraken", "coinbase"):
+            assert hasattr(ccxtpro, v), f"{v} not in ccxt.pro"

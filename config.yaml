@@ -14,7 +14,7 @@ exchange:
   enabled: true
   # ccxt.pro ids. Note: 'gate' (not gateio), 'coinbase' (Advanced Trade).
   # Robinhood has no public market-data WebSocket and cannot be supported.
-  exchanges: [binance, bybit, mexc, gate, kucoin, coinbase]
+  exchanges: [binance, bybit, okx, bitget, kucoin, gate, mexc, kraken, coinbase]
   symbols:
     - BTC/USDT
     - ETH/USDT
@@ -42,6 +42,12 @@ exchange:
   discovery_max_volume_usd: 50000000 # ignore majors (too deep to move)
   discovery_min_change_pct: 15      # |24h change| to qualify (pump OR dump)
   discovery_volume_surge: 3.0       # x median volume to qualify
+
+  # Newly listed tokens are watched unconditionally for a grace period —
+  # the abnormal move usually happens shortly after listing.
+  track_new_listings: true
+  new_listing_grace_h: 48           # hours to watch a new pair
+  new_listing_min_volume_usd: 20000 # lower liquidity bar for new listings
 
 # -------------------------------------------- Module 2: On-Chain Whale Tracker
 onchain:
