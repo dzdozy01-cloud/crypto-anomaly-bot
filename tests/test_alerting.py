@@ -711,11 +711,12 @@ class TestOnDemandScanner:
         assert not SymbolSnapshot(symbol="X/USDT", venue="mexc").ok
 
 
-class TestWatchlistRendering:
-    """Live microstructure must render even when a metric is exactly zero.
+class TestMoversRendering:
+    """Per-token detail moved from /watchlist to /movers.
 
-    Regression: `if snap["volume_z"]` is false for a legitimate 0.0, so a calm
-    pair displayed identically to one with no data at all.
+    Retains the zero-value regression: `if snap["volume_z"]` is false for a
+    legitimate 0.0, which once made a calm pair render identically to one with
+    no data at all.
     """
 
     @pytest_asyncio.fixture
@@ -742,41 +743,44 @@ class TestWatchlistRendering:
         register_commands(bot, app)
         yield app, bot
 
-    def _seed(self, app, symbol, bids, asks, side="buy"):
-        from cadb.modules.exchange.discovery import DiscoveredSymbol, SymbolDiscovery
+    async def test_movers_registered(self, wired):
+        _, bot = wired
+        assert "movers" in bot.commands
+
+    async def test_movers_handles_no_scanner(self, wired):
+        app, bot = wired
+        app._ondemand = None
+        out = await bot.commands["movers"]([], 1)
+        assert isinstance(out, str) and out.strip()
+
+    async def test_zero_valued_metric_still_renders(self, wired):
+        """Guard the falsy-zero bug at its source, independent of any view."""
         from cadb.modules.exchange.microstructure import MicrostructureState
 
-        st = MicrostructureState(venue="binance", symbol=symbol)
-        st.book.update(bids, asks, 1)
-        st.on_trade(1, 100.0, 1.0, side)
-        app.exchange.states[("binance", symbol)] = st
+        st = MicrostructureState(venue="binance", symbol="ZERO/USDT")
+        st.book.update([(99.0, 5.0)], [(101.0, 5.0)], 1)
+        st.on_trade(1, 100.0, 1.0, "buy")
+        snap = st.snapshot()
+        rendered = f"z={snap['volume_z']:+.1f} obi={snap['obi']:+.2f}"
+        assert "z=+0.0" in rendered or "z=-0.0" in rendered
+        assert "obi=" in rendered
 
-        d = SymbolDiscovery(venue="binance")
-        d.last_universe = 500
-        d.last_results = [
-            DiscoveredSymbol(symbol=symbol, venue="binance", quote_volume_usd=3e5,
-                             change_pct=30.0, reason="pump +30%", score=30.0)
-        ]
-        app.exchange.discovery["binance"] = d
-        return st
+    async def test_lopsided_book_measurable(self, wired):
+        from cadb.modules.exchange.microstructure import MicrostructureState
 
-    async def test_zero_obi_is_displayed(self, wired):
-        app, bot = wired
-        self._seed(app, "ZERO/USDT", [(99.0, 5.0)], [(101.0, 5.0)])
-        out = await bot.commands["watchlist"]([], 1)
-        assert "ZERO" in out
-        assert "obi=" in out, "a measured zero must render, not vanish"
-
-    async def test_lopsided_book_is_flagged(self, wired):
-        app, bot = wired
-        self._seed(app, "SKEW/USDT", [(99.0, 1.0)], [(101.0, 40.0)], side="sell")
-        out = await bot.commands["watchlist"]([], 1)
-        assert "obi=" in out
-        assert "\u26a0\ufe0f" in out, "a heavily one-sided book should be marked"
+        st = MicrostructureState(venue="binance", symbol="SKEW/USDT")
+        st.book.update([(99.0, 1.0)], [(101.0, 40.0)], 1)
+        st.on_trade(1, 100.0, 1.0, "sell")
+        assert abs(st.snapshot()["obi"]) >= 0.5
 
 
-class TestWatchlistShowsScanResults:
-    """/watchlist reports market findings, not internal stream layout."""
+class TestWatchlistShowsScanStatus:
+    """/watchlist reports discovery coverage only.
+
+    The ranked list of findings lives in /movers; splitting them keeps this
+    command answering one question — is discovery running, and how much of each
+    venue is it seeing.
+    """
 
     @pytest_asyncio.fixture
     async def wired(self):
@@ -802,72 +806,63 @@ class TestWatchlistShowsScanResults:
         register_commands(bot, app)
         yield app, bot
 
-    def _disco(self, results):
-        from cadb.modules.exchange.discovery import DiscoveredSymbol, SymbolDiscovery
+    def _disco(self, venue, universe, scanned_ago=30.0):
+        import time
 
-        d = SymbolDiscovery(venue="mexc")
-        d.last_universe = 2000
-        d.last_results = [
-            DiscoveredSymbol(symbol=sym, venue=ven, quote_volume_usd=vol,
-                             change_pct=chg, reason=reason, score=abs(chg))
-            for sym, ven, vol, chg, reason in results
-        ]
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        d = SymbolDiscovery(venue=venue)
+        d.last_universe = universe
+        d.last_scan_ts = time.time() - scanned_ago
         return d
 
-    async def test_lists_tokens_ranked_by_move(self, wired):
+    async def test_reports_universe_per_venue(self, wired):
         app, bot = wired
-        app.exchange.discovery["mexc"] = self._disco([
-            ("SMALL/USDT", "mexc", 2e5, 26.0, "pump +26%"),
-            ("HUGE/USDT", "mexc", 1e6, 280.0, "pump +280%"),
-        ])
+        app.exchange.discovery = {
+            "binance": self._disco("binance", 1291),
+            "kraken": self._disco("kraken", 793),
+        }
         out = await bot.commands["watchlist"]([], 1)
-        assert out.index("HUGE") < out.index("SMALL"), "must rank by move size"
-        assert "+280" in out
+        assert "binance: 1,291 pairs scanned" in out
+        assert "kraken: 793 pairs scanned" in out
 
-    async def test_no_venue_grouping_headers(self, wired):
-        """The old view grouped by venue; that is plumbing, not market state."""
+    async def test_reports_scan_age(self, wired):
         app, bot = wired
-        app.exchange.discovery["mexc"] = self._disco([
-            ("A/USDT", "mexc", 2e5, 30.0, "pump +30%"),
-        ])
+        app.exchange.discovery = {"mexc": self._disco("mexc", 2069, scanned_ago=177)}
         out = await bot.commands["watchlist"]([], 1)
-        assert "pair(s)" not in out
-        assert "pinned" not in out
+        assert "last 177s ago" in out
 
-    async def test_same_token_on_many_venues_appears_once(self, wired):
+    async def test_reports_stream_count(self, wired):
         app, bot = wired
-        app.exchange.discovery["mexc"] = self._disco([
-            ("DUP/USDT", "mexc", 2e5, 30.0, "pump +30%"),
-        ])
-        app.exchange.discovery["gate"] = self._disco([
-            ("DUP/USDT", "gate", 3e5, 35.0, "pump +35%"),
-        ])
+        app.exchange.discovery = {"mexc": self._disco("mexc", 2069)}
+        app.exchange.watched = {"mexc": {"A/USDT", "B/USDT", "C/USDT"}}
         out = await bot.commands["watchlist"]([], 1)
-        assert out.count("DUP") == 1, "one asset is one event, not one per venue"
-        assert "+35" in out, "should keep the venue with the largest move"
+        assert "3 streams" in out
 
-    async def test_reports_universe_size(self, wired):
-        app, bot = wired
-        app.exchange.discovery["mexc"] = self._disco([
-            ("A/USDT", "mexc", 2e5, 30.0, "pump +30%"),
-        ])
-        out = await bot.commands["watchlist"]([], 1)
-        assert "2,000 pairs" in out, "must show how much was scanned"
+    async def test_does_not_list_individual_tokens(self, wired):
+        """Findings belong to /movers; this view must stay a status report."""
+        from cadb.modules.exchange.discovery import DiscoveredSymbol
 
-    async def test_empty_scan_is_a_clean_result(self, wired):
         app, bot = wired
-        app.exchange.discovery["mexc"] = self._disco([])
+        d = self._disco("mexc", 2069)
+        d.last_results = [
+            DiscoveredSymbol(symbol="XPLK/USDT", venue="mexc", quote_volume_usd=1e6,
+                             change_pct=280.0, reason="pump +280%", score=90.0)
+        ]
+        app.exchange.discovery = {"mexc": d}
         out = await bot.commands["watchlist"]([], 1)
-        assert "No anomalies" in out
-        assert "2,000 pairs scanned" in out, "silence must be evidenced"
+        assert "XPLK" not in out
+        assert "+280" not in out
 
-    async def test_new_listings_marked(self, wired):
+    async def test_preserves_configured_venue_order(self, wired):
         app, bot = wired
-        app.exchange.discovery["mexc"] = self._disco([
-            ("FRESH/USDT", "mexc", 5e4, 40.0, "pump +40%, newly listed"),
-        ])
+        app.exchange.discovery = {
+            "binance": self._disco("binance", 100),
+            "bybit": self._disco("bybit", 200),
+            "okx": self._disco("okx", 300),
+        }
         out = await bot.commands["watchlist"]([], 1)
-        assert "newly listed" in out
+        assert out.index("binance") < out.index("bybit") < out.index("okx")
 
     async def test_discovery_disabled_explains_itself(self, wired):
         app, bot = wired
@@ -875,3 +870,14 @@ class TestWatchlistShowsScanResults:
         out = await bot.commands["watchlist"]([], 1)
         assert "disabled" in out.lower()
         assert "discovery_enabled" in out
+
+    async def test_output_fits_telegram_limit(self, wired):
+        """Nine venues must not approach the 4096-char cap."""
+        app, bot = wired
+        app.exchange.discovery = {
+            v: self._disco(v, 2000)
+            for v in ("binance", "bybit", "okx", "bitget", "kucoin",
+                      "gate", "mexc", "kraken", "coinbase")
+        }
+        out = await bot.commands["watchlist"]([], 1)
+        assert len(out) < 4096

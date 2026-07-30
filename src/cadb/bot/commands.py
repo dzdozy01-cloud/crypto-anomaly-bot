@@ -819,11 +819,12 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
 
     # ----------------------------------------------------- /watchlist
     async def watchlist_cmd(args: list[str], chat_id: int) -> str:
-        """Show what discovery found, ranked — not the internal stream layout.
+        """Discovery scan status: coverage per venue and scan freshness.
 
-        Previously this listed subscriptions grouped by venue, which reflects
-        plumbing rather than market state. What matters is which tokens the
-        scan surfaced and why.
+        Deliberately just the scan report. The ranked list of what was actually
+        found lives in /movers; keeping the two separate means this command
+        answers one question cleanly — is discovery running, and how much of
+        each venue is it seeing.
         """
         if not app.exchange:
             return "⚠️ Exchange engine not enabled."
@@ -834,62 +835,22 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
                 "venues automatically.</i>"
             )
 
-        # Collapse per-venue results to one row per token, keeping the venue
-        # with the largest move — the same asset flagged on four exchanges is
-        # one event, not four.
-        best: dict[str, Any] = {}
-        universe = 0
-        for disco in app.exchange.discovery.values():
-            universe += disco.last_universe
-            for c in disco.last_results:
-                base = c.symbol.split("/")[0]
-                cur = best.get(base)
-                if cur is None or abs(c.change_pct) > abs(cur.change_pct):
-                    best[base] = c
+        lines = ["<b>Discovery</b>", ""]
+        # Config order, not alphabetical — it matches exchange.exchanges so the
+        # reader can map this straight onto their configuration.
+        for venue, disco in app.exchange.discovery.items():
+            st = disco.stats()
+            universe = disco.last_universe or st.get("universe", 0)
+            ago = st.get("last_scan_s_ago")
+            when = f"last {ago:.0f}s ago" if ago is not None else "pending"
+            lines.append(f"  {venue}: {universe:,} pairs scanned, {when}")
 
-        if not best:
-            thr = app.settings.exchange.discovery_min_change_pct
-            return (
-                "🟢 <b>No anomalies detected</b>\n\n"
-                f"<i>{universe:,} pairs scanned across "
-                f"{len(app.exchange.discovery)} venues. Nothing exceeds "
-                f"±{thr:.0f}% with adequate liquidity.</i>"
-            )
-
-        ranked = sorted(best.values(), key=lambda c: -abs(c.change_pct))
-        lines = ["<b>🔎 Scanned Tokens</b>", ""]
-
-        for c in ranked[:25]:
-            base = c.symbol.split("/")[0]
-            arrow = "🟢" if c.change_pct > 0 else "🔴"
-            # Live microstructure when the pair is streaming, so the row shows
-            # current book state rather than only the 24h headline.
-            live = ""
-            for (v, sym), st in app.exchange.states.items():
-                if sym == c.symbol and v == c.venue and st.trades_seen > 0:
-                    snap = st.snapshot()
-                    warn = (
-                        " ⚠️"
-                        if abs(snap["volume_z"]) >= 3.0 or abs(snap["obi"]) >= 0.5
-                        else ""
-                    )
-                    live = f"  obi={snap['obi']:+.2f}{warn}"
-                    break
-            lines.append(
-                f"{arrow} <code>{base:<10}{c.change_pct:+8.1f}%</code> "
-                f"{_usd(c.quote_volume_usd):>9}  <i>{c.venue}</i>{live}"
-            )
-            if "newly listed" in c.reason or "new listing" in c.reason:
-                lines.append("      🆕 <i>newly listed</i>")
-
-        if len(ranked) > 25:
-            lines.append(f"\n<i>… and {len(ranked) - 25} more</i>")
-
+        streams = sum(len(v) for v in app.exchange.watched.values())
+        pinned = len(app.settings.exchange.symbols)
         lines += [
             "",
-            f"<i>{len(ranked)} token(s) flagged from {universe:,} pairs across "
-            f"{len(app.exchange.discovery)} venues</i>",
-            "<i>/check &lt;SYMBOL&gt; for a full report</i>",
+            f"📌 pinned · 🔎 auto-discovered · {streams} streams"
+            + (f" ({pinned} pinned)" if pinned else ""),
         ]
         return "\n".join(lines)
 
