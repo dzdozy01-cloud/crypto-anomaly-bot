@@ -136,6 +136,10 @@ class ExchangeConfig(BaseModel):
     # Quote currencies to scan. Coinbase and Kraken are USD/USDC venues, so a
     # USDT-only scan saw 3% and 6% of their markets. Fiat (EUR/GBP) is excluded:
     # it duplicates the same asset at an FX offset.
+    # Moves beyond this must be seen on at least one other venue.
+    # A single venue reporting an extreme move alone is usually a bad
+    # ticker field, not a real dislocation.
+    corroboration_threshold_pct: float = 50.0
     discovery_quotes: list[str] = Field(
         default_factory=lambda: ["USDT", "USDC", "USD", "FDUSD", "USD1"]
     )

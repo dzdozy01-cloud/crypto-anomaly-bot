@@ -45,6 +45,8 @@ exchange:
   # Coinbase/Kraken quote in USD and USDC, not USDT — scanning only USDT made
   # them nearly invisible. One slot per base asset regardless of quote.
   discovery_quotes: [USDT, USDC, USD, FDUSD, USD1]
+  # Moves above this need confirmation from another venue.
+  corroboration_threshold_pct: 50
 
   # Newly listed tokens are watched unconditionally for a grace period —
   # the abnormal move usually happens shortly after listing.

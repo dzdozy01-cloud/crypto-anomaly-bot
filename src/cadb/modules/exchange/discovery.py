@@ -76,6 +76,9 @@ class SymbolDiscovery:
     # A new listing must also show real movement or real liquidity. Without
     # this, "first seen in the ticker feed" alone was enough to win a slot.
     new_listing_min_change_pct: float = 10.0
+    # Percentage-points of disagreement tolerated between a venue's reported
+    # 24h change and the value implied by its own open/last prices.
+    max_change_disagreement_pp: float = 15.0
 
     # symbol -> rolling median 24h volume, for surge detection
     _volume_history: dict[str, list[float]] = field(default_factory=dict, repr=False)
@@ -90,6 +93,9 @@ class SymbolDiscovery:
     # was found rather than only how many pairs were examined.
     last_results: list[DiscoveredSymbol] = field(default_factory=list, repr=False)
     last_universe: int = 0
+    rejected_inconsistent: int = 0
+    # base asset -> latest 24h move seen on this venue, for cross-venue checks.
+    last_ticker_moves: dict[str, float] = field(default_factory=dict, repr=False)
 
     # ---- ranking ---------------------------------------------------------
     def _volume_baseline(self, symbol: str) -> float | None:
@@ -125,11 +131,38 @@ class SymbolDiscovery:
             # a +0.4% move.
             seen_now.add(symbol)
             volume = float(data.get("quoteVolume") or 0.0)
+            _pct = data.get("percentage")
+            if _pct is not None:
+                self.last_ticker_moves[symbol.split("/")[0]] = float(_pct)
             if volume <= 0:
                 continue
 
             change = data.get("percentage")
             change = float(change) if change is not None else 0.0
+
+            # Cross-check the venue's own 24h figure against open/last. Some
+            # venues report a `percentage` that disagrees with their own price
+            # fields — a Binance sweep reported ~20 tokens at -55% to -75%
+            # simultaneously while the identical assets sat at +1% to +4% on
+            # MEXC. Trusting the field alone turned a feed artefact into two
+            # dozen phantom "dumps" that crowded out real ones.
+            open_px = data.get("open")
+            last_px = data.get("last") or data.get("close")
+            derived: float | None = None
+            if open_px and last_px:
+                try:
+                    op, lp = float(open_px), float(last_px)
+                    if op > 0:
+                        derived = (lp - op) / op * 100.0
+                except (TypeError, ValueError):
+                    derived = None
+            if derived is not None and abs(change - derived) > self.max_change_disagreement_pp:
+                self.rejected_inconsistent += 1
+                log.debug(
+                    "%s %s: 24h field %+.1f%% contradicts open/last %+.1f%% — skipping",
+                    self.venue, symbol, change, derived,
+                )
+                continue
             baseline = self._volume_baseline(symbol)
             self._record_volume(symbol, volume)
 

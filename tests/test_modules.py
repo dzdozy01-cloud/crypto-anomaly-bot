@@ -1030,3 +1030,110 @@ class TestMultiQuoteScanning:
         quotes = Settings().exchange.discovery_quotes
         assert "USD" in quotes and "USDC" in quotes and "USDT" in quotes
         assert "EUR" not in quotes
+
+
+class TestBogusTickerRejection:
+    """Regression: ~20 Binance tokens flagged at -55% to -75% simultaneously.
+
+    The same assets were at +1% to +4% on MEXC at the same moment (INIT +2.68,
+    EDEN +4.25, BIO +1.05, NFP -6.23, MITO +1.41), and BTC/ETH were flat. A
+    market-wide 70% crash confined to one venue is a feed artefact, not an
+    event, and it crowded genuine movers out of the watchlist.
+    """
+
+    def _disco(self, **kw):
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        params = {
+            "venue": "binance", "max_symbols": 30, "min_volume_usd": 100_000,
+            "max_volume_usd": 50_000_000, "min_change_pct": 25.0,
+        }
+        params.update(kw)
+        return SymbolDiscovery(**params)
+
+    def test_percentage_contradicting_open_last_is_rejected(self):
+        d = self._disco()
+        found = d.evaluate({
+            "DF/USDT": {"quoteVolume": 2.8e5, "percentage": -74.3,
+                        "open": 1.00, "last": 0.99},
+        })
+        assert not found, "a -74% claim on a flat open/last must be dropped"
+        assert d.rejected_inconsistent == 1
+
+    def test_consistent_extreme_move_is_kept(self):
+        d = self._disco()
+        found = d.evaluate({
+            "REAL/USDT": {"quoteVolume": 2.8e5, "percentage": -74.3,
+                          "open": 1.00, "last": 0.257},
+        })
+        assert [c.symbol for c in found] == ["REAL/USDT"]
+
+    def test_missing_open_last_falls_back_to_percentage(self):
+        """Not every venue returns open/last; absence must not reject."""
+        d = self._disco()
+        found = d.evaluate({"X/USDT": {"quoteVolume": 3e5, "percentage": -60.0}})
+        assert [c.symbol for c in found] == ["X/USDT"]
+
+    def test_small_disagreement_tolerated(self):
+        d = self._disco()
+        found = d.evaluate({
+            "Y/USDT": {"quoteVolume": 3e5, "percentage": -60.0,
+                       "open": 1.0, "last": 0.45},
+        })
+        assert found, "rounding-level disagreement must not reject"
+
+
+class TestCrossVenueCorroboration:
+    """An extreme move no other venue sees is almost certainly bad data."""
+
+    def _engine(self):
+        from cadb.core.bus import InProcessBus
+        from cadb.core.config import ExchangeConfig
+        from cadb.modules.exchange.engine import ExchangeEngine
+
+        return ExchangeEngine(InProcessBus(), ExchangeConfig(simulate=True))
+
+    def _disco(self, venue, moves):
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        d = SymbolDiscovery(venue=venue)
+        d.last_ticker_moves = moves
+        return d
+
+    def test_uncorroborated_extreme_move_rejected(self):
+        eng = self._engine()
+        eng.discovery = {
+            "binance": self._disco("binance", {"INIT": -73.4}),
+            "mexc": self._disco("mexc", {"INIT": 2.68}),
+        }
+        assert not eng._corroborate("binance", "INIT/USDT", -73.4)
+
+    def test_genuine_crash_survives(self):
+        eng = self._engine()
+        eng.discovery = {
+            "binance": self._disco("binance", {"RUG": -68.0}),
+            "mexc": self._disco("mexc", {"RUG": -71.0}),
+        }
+        assert eng._corroborate("binance", "RUG/USDT", -68.0)
+
+    def test_exclusive_listing_not_penalised(self):
+        """Most real meme-coin pumps are single-venue; do not drop them."""
+        eng = self._engine()
+        eng.discovery = {"mexc": self._disco("mexc", {"XPLK": 280.0})}
+        assert eng._corroborate("mexc", "XPLK/USDT", 280.0)
+
+    def test_moderate_moves_never_gated(self):
+        eng = self._engine()
+        eng.discovery = {
+            "binance": self._disco("binance", {"S": -30.0}),
+            "mexc": self._disco("mexc", {"S": 1.0}),
+        }
+        assert eng._corroborate("binance", "S/USDT", -30.0)
+
+    def test_opposite_direction_is_not_corroboration(self):
+        eng = self._engine()
+        eng.discovery = {
+            "binance": self._disco("binance", {"Z": -70.0}),
+            "gate": self._disco("gate", {"Z": 65.0}),
+        }
+        assert not eng._corroborate("binance", "Z/USDT", -70.0)

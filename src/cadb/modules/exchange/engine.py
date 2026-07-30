@@ -169,6 +169,50 @@ class ExchangeEngine(Module):
                     self.log.warning("%s discovery scan failed: %s", venue, exc)
             await asyncio.sleep(self.config.discovery_interval_s)
 
+    def _corroborate(self, venue: str, symbol: str, change_pct: float) -> bool:
+        """Check an extreme move against the same asset on other venues.
+
+        A single venue reporting a large move that no other venue sees is far
+        more likely to be a bad ticker field than a real dislocation: real moves
+        arbitrage across exchanges within seconds. A Binance sweep once flagged
+        ~20 tokens at -55% to -75% while the identical assets were at +1% to +4%
+        on MEXC — self-consistent within Binance's own feed, but contradicted by
+        every other venue.
+
+        Returns True when the move is plausible (corroborated, or not extreme
+        enough to require corroboration, or not listed elsewhere to check).
+        """
+        if abs(change_pct) < self.config.corroboration_threshold_pct:
+            return True
+
+        base = symbol.split("/")[0]
+        others: list[float] = []
+        for other_venue, disco in self.discovery.items():
+            if other_venue == venue:
+                continue
+            for cand in disco.last_results:
+                if cand.symbol.split("/")[0] == base:
+                    others.append(cand.change_pct)
+            # Also consult the raw universe, not just flagged candidates.
+            snapshot = disco.last_ticker_moves.get(base)
+            if snapshot is not None:
+                others.append(snapshot)
+
+        if not others:
+            return True  # nowhere else to check; accept rather than silently drop
+
+        # Same direction and within a wide band counts as corroboration.
+        for other in others:
+            if change_pct * other > 0 and abs(change_pct - other) <= 40.0:
+                return True
+
+        self.log.info(
+            "%s %s %+.1f%% not corroborated elsewhere (%s) — ignoring",
+            venue, symbol, change_pct,
+            ", ".join(f"{o:+.0f}%" for o in others[:3]),
+        )
+        return False
+
     async def _rescan(self, venue: str, disco: SymbolDiscovery) -> None:
         feed = self.feeds.get(venue)
         client = getattr(feed, "_client", None) or (
@@ -178,7 +222,14 @@ class ExchangeEngine(Module):
             return
 
         tickers = await client.fetch_tickers()
-        wanted = set(disco.watchlist(tickers))
+        found = disco.evaluate(tickers)
+        # Drop extreme moves no other venue can confirm.
+        credible = [
+            c for c in found if self._corroborate(venue, c.symbol, c.change_pct)
+        ]
+        disco.last_results = credible
+        pinned_syms = [s for s in self.config.symbols if s in tickers]
+        wanted = set(pinned_syms + [c.symbol for c in credible])
         pinned = set(self.config.symbols)
         current = set(self.watched.get(venue, set()))
 
