@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Update a running CADB deployment.
 #
+#   bash deploy/update.sh           # always works, regardless of file mode
 #   ./deploy/update.sh              # rebuild/pull + force-recreate + verify
 #   ./deploy/update.sh --config     # ALSO refresh config.yaml from the repo
 #
@@ -22,6 +23,16 @@ c_warn() { printf '\033[33m⚠️  %s\033[0m\n' "$*"; }
 if [[ -d .git ]]; then
   c_info "pulling latest source"
   git pull --ff-only
+
+  # Self-heal the executable bit. The upstream repo is edited by tooling that
+  # restores files without it, and git honours the on-disk mode by default, so
+  # a routine `git add -A` can silently commit 100755 -> 100644 and every clone
+  # then fails with "Permission denied". Repair it locally so the next
+  # ./deploy/update.sh works even if upstream regresses again.
+  git config core.fileMode false 2>/dev/null || true
+  for f in deploy/*.sh; do
+    [[ -f "$f" && ! -x "$f" ]] && chmod +x "$f" && c_warn "restored exec bit on $f"
+  done
 fi
 
 if (( REFRESH_CONFIG )) && [[ -f config.yaml ]]; then

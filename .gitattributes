@@ -1,0 +1,6 @@
+# The sandbox that edits this repo restores files without the exec bit and
+# git honours the on-disk mode by default, so `git add -A` silently commits
+# 100755 -> 100644 and every clone gets "Permission denied". Marking the
+# scripts here is advisory, but the paired CI check + test enforce it.
+deploy/*.sh text eol=lf
+*.sh text eol=lf

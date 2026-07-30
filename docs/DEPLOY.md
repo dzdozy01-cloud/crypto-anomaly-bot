@@ -290,12 +290,16 @@ project directory (`crypto-anomaly-bot-cadb-1`), so the lookup failed and
 produced a malformed multi-line value. It now resolves the id via
 `docker compose ps -q`. If you saw this, the deploy had actually succeeded.
 
-**`./deploy/update.sh: Permission denied`** — fixed in the repo; if you are on an
-older clone, either re-pull or run the script explicitly:
+**`./deploy/update.sh: Permission denied`** — fixed, and now guarded three ways
+(`core.fileMode=false`, a CI job, and a test). If you hit it on an older clone:
 
 ```bash
-bash deploy/update.sh        # works regardless of the file mode
+bash deploy/update.sh        # works regardless of file mode
 ```
+
+That invocation always works because it hands the file to bash directly rather
+than relying on the exec bit. `update.sh` also repairs its own permissions after
+each pull, so a single run is enough to fix future updates.
 
 **Changes don't take effect after `git pull`** — `docker compose up -d` compares
 the *compose file*, not the image contents. When only Python source changed it

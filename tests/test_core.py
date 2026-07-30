@@ -689,6 +689,32 @@ class TestDeployScriptsAreExecutable:
     index — a local chmod does not help anyone who clones.
     """
 
+    def test_core_filemode_is_disabled(self):
+        """git must ignore the on-disk exec bit in this repo.
+
+        This is the actual root cause of the regression. The tooling that edits
+        this repo restores files without the exec bit; with core.fileMode=true
+        (the default) git treats that as an intentional change, so `git add -A`
+        silently rewrites 100755 -> 100644 and ships a broken script. Setting it
+        false makes the index the single source of truth.
+        """
+        import subprocess
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parent.parent
+        if not (repo / ".git").exists():
+            import pytest
+
+            pytest.skip("not a git checkout")
+        value = subprocess.run(
+            ["git", "config", "core.fileMode"],
+            cwd=repo, capture_output=True, text=True, check=False,
+        ).stdout.strip()
+        assert value == "false", (
+            "core.fileMode must be false or the exec bit regresses on every "
+            "commit; run `git config core.fileMode false`"
+        )
+
     def test_scripts_have_exec_bit_in_git(self):
         import subprocess
         from pathlib import Path
