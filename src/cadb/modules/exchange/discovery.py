@@ -86,6 +86,10 @@ class SymbolDiscovery:
     _first_scan: bool = True
     last_scan_ts: float = 0.0
     scans: int = 0
+    # Results of the most recent scan, retained so consumers can report *what*
+    # was found rather than only how many pairs were examined.
+    last_results: list[DiscoveredSymbol] = field(default_factory=list, repr=False)
+    last_universe: int = 0
 
     # ---- ranking ---------------------------------------------------------
     def _volume_baseline(self, symbol: str) -> float | None:
@@ -221,6 +225,7 @@ class SymbolDiscovery:
 
         self._known_symbols |= seen_now
         self._first_scan = False
+        self.last_universe = len(seen_now)
 
         candidates.sort(key=lambda c: -c.score)
 
@@ -248,7 +253,9 @@ class SymbolDiscovery:
                 self.venue, len(selected), len(seen_now),
                 "; ".join(str(c) for c in selected[:3]),
             )
-        return [c for c in selected if c.symbol in chosen]
+        results = [c for c in selected if c.symbol in chosen]
+        self.last_results = results
+        return results
 
     def watchlist(self, tickers: dict[str, dict[str, Any]]) -> list[str]:
         """Convenience: pinned symbols plus the ranked discoveries."""

@@ -819,50 +819,78 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
 
     # ----------------------------------------------------- /watchlist
     async def watchlist_cmd(args: list[str], chat_id: int) -> str:
-        """Show which pairs are streamed, and which were auto-discovered."""
+        """Show what discovery found, ranked — not the internal stream layout.
+
+        Previously this listed subscriptions grouped by venue, which reflects
+        plumbing rather than market state. What matters is which tokens the
+        scan surfaced and why.
+        """
         if not app.exchange:
             return "⚠️ Exchange engine not enabled."
-        pinned = set(app.settings.exchange.symbols)
-        lines = ["<b>📡 Watchlist</b>", ""]
-        total = 0
-        for venue in sorted(app.exchange.watched):
-            syms = sorted(app.exchange.watched[venue])
-            total += len(syms)
-            lines.append(f"<b>{venue}</b> — {len(syms)} pair(s)")
-            for sym in syms[:14]:
-                tag = "📌" if sym in pinned else "🔎"
-                st = app.exchange.states.get((venue, sym))
-                # `if snap["volume_z"]` treated a legitimate 0.0 as missing, so
-                # a calm pair rendered identically to one with no data at all.
-                # Distinguish "warming up" from "measured and quiet" explicitly.
-                if st is None or st.trades_seen == 0:
-                    extra = "  <i>warming up</i>"
-                else:
-                    snap = st.snapshot()
-                    z = snap["volume_z"]
-                    obi = snap["obi"]
-                    flag = " ⚠️" if abs(z) >= 3.0 or abs(obi) >= 0.5 else ""
-                    extra = f"  z={z:+.1f} obi={obi:+.2f}{flag}"
-                lines.append(f"  {tag} <code>{sym}</code>{extra}")
-            if len(syms) > 14:
-                lines.append(f"  <i>… and {len(syms) - 14} more</i>")
-            lines.append("")
-
-        if app.exchange.discovery:
-            lines.append("<b>Discovery</b>")
-            for venue, d in app.exchange.discovery.items():
-                st = d.stats()
-                ago = st["last_scan_s_ago"]
-                lines.append(
-                    f"  {venue}: {st['universe']:,} pairs scanned"
-                    + (f", last {ago:.0f}s ago" if ago else ", pending")
-                )
-        else:
-            lines.append(
-                "<i>Discovery disabled — only pinned symbols are watched. "
-                "Set exchange.discovery_enabled: true to auto-track movers.</i>"
+        if not app.exchange.discovery:
+            return (
+                "⚠️ Discovery is disabled.\n\n"
+                "<i>Set <code>exchange.discovery_enabled: true</code> to scan "
+                "venues automatically.</i>"
             )
-        lines += ["", f"<i>📌 pinned · 🔎 auto-discovered · {total} streams</i>"]
+
+        # Collapse per-venue results to one row per token, keeping the venue
+        # with the largest move — the same asset flagged on four exchanges is
+        # one event, not four.
+        best: dict[str, Any] = {}
+        universe = 0
+        for disco in app.exchange.discovery.values():
+            universe += disco.last_universe
+            for c in disco.last_results:
+                base = c.symbol.split("/")[0]
+                cur = best.get(base)
+                if cur is None or abs(c.change_pct) > abs(cur.change_pct):
+                    best[base] = c
+
+        if not best:
+            thr = app.settings.exchange.discovery_min_change_pct
+            return (
+                "🟢 <b>No anomalies detected</b>\n\n"
+                f"<i>{universe:,} pairs scanned across "
+                f"{len(app.exchange.discovery)} venues. Nothing exceeds "
+                f"±{thr:.0f}% with adequate liquidity.</i>"
+            )
+
+        ranked = sorted(best.values(), key=lambda c: -abs(c.change_pct))
+        lines = ["<b>🔎 Scanned Tokens</b>", ""]
+
+        for c in ranked[:25]:
+            base = c.symbol.split("/")[0]
+            arrow = "🟢" if c.change_pct > 0 else "🔴"
+            # Live microstructure when the pair is streaming, so the row shows
+            # current book state rather than only the 24h headline.
+            live = ""
+            for (v, sym), st in app.exchange.states.items():
+                if sym == c.symbol and v == c.venue and st.trades_seen > 0:
+                    snap = st.snapshot()
+                    warn = (
+                        " ⚠️"
+                        if abs(snap["volume_z"]) >= 3.0 or abs(snap["obi"]) >= 0.5
+                        else ""
+                    )
+                    live = f"  obi={snap['obi']:+.2f}{warn}"
+                    break
+            lines.append(
+                f"{arrow} <code>{base:<10}{c.change_pct:+8.1f}%</code> "
+                f"{_usd(c.quote_volume_usd):>9}  <i>{c.venue}</i>{live}"
+            )
+            if "newly listed" in c.reason or "new listing" in c.reason:
+                lines.append("      🆕 <i>newly listed</i>")
+
+        if len(ranked) > 25:
+            lines.append(f"\n<i>… and {len(ranked) - 25} more</i>")
+
+        lines += [
+            "",
+            f"<i>{len(ranked)} token(s) flagged from {universe:,} pairs across "
+            f"{len(app.exchange.discovery)} venues</i>",
+            "<i>/check &lt;SYMBOL&gt; for a full report</i>",
+        ]
         return "\n".join(lines)
 
     # -------------------------------------------------------- /whoami
