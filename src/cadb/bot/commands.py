@@ -832,11 +832,17 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             for sym in syms[:14]:
                 tag = "📌" if sym in pinned else "🔎"
                 st = app.exchange.states.get((venue, sym))
-                extra = ""
-                if st:
+                # `if snap["volume_z"]` treated a legitimate 0.0 as missing, so
+                # a calm pair rendered identically to one with no data at all.
+                # Distinguish "warming up" from "measured and quiet" explicitly.
+                if st is None or st.trades_seen == 0:
+                    extra = "  <i>warming up</i>"
+                else:
                     snap = st.snapshot()
-                    if snap["volume_z"]:
-                        extra = f"  z={snap['volume_z']:+.1f}"
+                    z = snap["volume_z"]
+                    obi = snap["obi"]
+                    flag = " ⚠️" if abs(z) >= 3.0 or abs(obi) >= 0.5 else ""
+                    extra = f"  z={z:+.1f} obi={obi:+.2f}{flag}"
                 lines.append(f"  {tag} <code>{sym}</code>{extra}")
             if len(syms) > 14:
                 lines.append(f"  <i>… and {len(syms) - 14} more</i>")

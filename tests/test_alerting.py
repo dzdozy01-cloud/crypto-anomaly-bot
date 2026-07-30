@@ -709,3 +709,70 @@ class TestOnDemandScanner:
         from cadb.modules.exchange.ondemand import SymbolSnapshot
 
         assert not SymbolSnapshot(symbol="X/USDT", venue="mexc").ok
+
+
+class TestWatchlistRendering:
+    """Regression: `if snap["volume_z"]` hid legitimate zero values.
+
+    A pair measured at exactly 0.0 rendered identically to one with no data,
+    so most of /watchlist appeared blank and there was no way to tell a calm
+    market from a stream that had not started.
+    """
+
+    @pytest_asyncio.fixture
+    async def wired(self):
+        from cadb.app import Application
+        from cadb.bot.commands import register_commands
+        from cadb.bot.telegram_bot import TelegramBot
+        from cadb.core.config import Settings
+
+        s = Settings()
+        s.exchange.simulate = True
+        s.exchange.exchanges = ["binance"]
+        s.exchange.discovery_enabled = False
+        s.onchain.enabled = False
+        s.social.enabled = False
+        s.ml.model_path = ""
+        s.alerts.dry_run = True
+        s.telemetry.log_level = "ERROR"
+        s.telemetry.state_file = ""
+        app = Application(s)
+        await app.setup()
+        bot = TelegramBot(token="")
+        app.bot = bot
+        register_commands(bot, app)
+        yield app, bot
+
+    async def test_zero_zscore_is_displayed(self, wired):
+        from cadb.modules.exchange.microstructure import MicrostructureState
+
+        app, bot = wired
+        st = MicrostructureState(venue="binance", symbol="ZERO/USDT")
+        st.book.update([(99.0, 5.0)], [(101.0, 5.0)], 1)
+        st.on_trade(1, 100.0, 1.0, "buy")
+        app.exchange.states[("binance", "ZERO/USDT")] = st
+        app.exchange.watched["binance"] = {"ZERO/USDT"}
+
+        out = await bot.commands["watchlist"]([], 1)
+        assert "ZERO/USDT" in out
+        assert "z=+0.0" in out, "a measured zero must render, not vanish"
+
+    async def test_unstarted_stream_says_warming_up(self, wired):
+        app, bot = wired
+        app.exchange.watched["binance"] = {"NEW/USDT"}
+        out = await bot.commands["watchlist"]([], 1)
+        assert "warming up" in out, "no-data must be distinguishable from quiet"
+
+    async def test_lopsided_book_is_flagged(self, wired):
+        from cadb.modules.exchange.microstructure import MicrostructureState
+
+        app, bot = wired
+        st = MicrostructureState(venue="binance", symbol="SKEW/USDT")
+        st.book.update([(99.0, 1.0)], [(101.0, 40.0)], 1)
+        st.on_trade(1, 100.0, 1.0, "sell")
+        app.exchange.states[("binance", "SKEW/USDT")] = st
+        app.exchange.watched["binance"] = {"SKEW/USDT"}
+
+        out = await bot.commands["watchlist"]([], 1)
+        assert "obi=" in out
+        assert "⚠️" in out, "a heavily one-sided book should be marked"
