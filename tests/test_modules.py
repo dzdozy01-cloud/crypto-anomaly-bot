@@ -753,23 +753,33 @@ class TestNewListingTracking:
         return SymbolDiscovery(**params)
 
     def test_new_listing_tracked_before_it_pumps(self):
-        """The run-up is the point — subscribing after the spike is too late."""
+        """Catch the run-up, but require *some* activity to justify the slot.
+
+        Originally this asserted a brand-new pair was watched while completely
+        flat. That was too permissive: a dormant pair reappearing in the ticker
+        feed is indistinguishable from a real listing, so the watchlist filled
+        with dead altcoins. A modest early move (below the 25% headline
+        threshold) is enough to qualify — that is still "before it pumps".
+        """
         d = self._disco()
         base = {"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0}}
         d.evaluate(base)
         t = dict(base)
-        t["FRESH/USDT"] = {"quoteVolume": 35_000, "percentage": 3.0}
+        t["FRESH/USDT"] = {"quoteVolume": 35_000, "percentage": 12.0}
         found = {c.symbol for c in d.evaluate(t)}
-        assert "FRESH/USDT" in found, "new listing must be watched while quiet"
+        assert "FRESH/USDT" in found, "an early-moving new listing must be watched"
 
     def test_new_listing_below_normal_floor_still_tracked(self):
+        """A thin new listing still qualifies — provided it is actually moving."""
         d = self._disco()
         d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0}})
         t = {
             "OLD/USDT": {"quoteVolume": 5e5, "percentage": 2.0},
-            "TINY/USDT": {"quoteVolume": 25_000, "percentage": 1.0},
+            "TINY/USDT": {"quoteVolume": 25_000, "percentage": 18.0},
         }
-        assert "TINY/USDT" in {c.symbol for c in d.evaluate(t)}
+        assert "TINY/USDT" in {c.symbol for c in d.evaluate(t)}, (
+            "the lower liquidity floor for new listings must still apply"
+        )
 
     def test_grace_period_expires(self):
         import time
@@ -858,3 +868,87 @@ class TestNoPinnedMajors:
         from cadb.core.config import Settings
 
         assert Settings().exchange.discovery_min_change_pct >= 25.0
+
+
+class TestDormantCoinsNotFlaggedAsNew:
+    """Regression: the watchlist filled with dead altcoins.
+
+    A2Z, ACA, ATA, DENT, FIO, HARD — long-listed Binance pairs with no activity
+    — occupied 20 WebSocket slots. Cause: symbols with zero 24h volume were
+    skipped *before* being recorded in `_known_symbols`, so the first time one
+    traded it looked brand new and won a 48-hour subscription on a +0.4% move.
+    """
+
+    def _disco(self, **kw):
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        params = {
+            "venue": "test", "max_symbols": 20, "min_volume_usd": 100_000,
+            "max_volume_usd": 50_000_000, "min_change_pct": 25.0,
+            "track_new_listings": True, "new_listing_min_volume_usd": 20_000,
+        }
+        params.update(kw)
+        return SymbolDiscovery(**params)
+
+    def test_zero_volume_symbol_is_still_recorded(self):
+        d = self._disco()
+        d.evaluate({"DENT/USDT": {"quoteVolume": 0.0, "percentage": 0.0}})
+        assert "DENT/USDT" in d._known_symbols, (
+            "a listed-but-dormant pair must be recorded, or it looks new later"
+        )
+
+    def test_dormant_coin_waking_up_is_not_a_new_listing(self):
+        d = self._disco()
+        d.evaluate({"DENT/USDT": {"quoteVolume": 0.0, "percentage": 0.0}})
+        found = d.evaluate({"DENT/USDT": {"quoteVolume": 45_000.0, "percentage": 0.4}})
+        assert not found, f"dormant coin flagged: {[c.reason for c in found]}"
+
+    def test_new_listing_needs_real_activity(self):
+        """"First seen" alone must not win a WebSocket slot."""
+        d = self._disco()
+        d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 1.0}})
+        quiet = d.evaluate({
+            "OLD/USDT": {"quoteVolume": 5e5, "percentage": 1.0},
+            "QUIETNEW/USDT": {"quoteVolume": 25_000.0, "percentage": 0.5},
+        })
+        assert not any(c.symbol == "QUIETNEW/USDT" for c in quiet)
+
+    def test_genuine_new_listing_still_caught(self):
+        """Guard against over-correcting into missed detections."""
+        d = self._disco()
+        d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 1.0}})
+        found = d.evaluate({
+            "OLD/USDT": {"quoteVolume": 5e5, "percentage": 1.0},
+            "REALNEW/USDT": {"quoteVolume": 45_000.0, "percentage": 38.0},
+        })
+        hit = next((c for c in found if c.symbol == "REALNEW/USDT"), None)
+        assert hit is not None and "newly listed" in hit.reason
+
+    def test_liquid_new_listing_caught_even_if_flat(self):
+        """Real liquidity on a brand-new pair is itself notable."""
+        d = self._disco()
+        d.evaluate({"OLD/USDT": {"quoteVolume": 5e5, "percentage": 1.0}})
+        found = d.evaluate({
+            "OLD/USDT": {"quoteVolume": 5e5, "percentage": 1.0},
+            "BIGNEW/USDT": {"quoteVolume": 2e6, "percentage": 2.0},
+        })
+        assert any(c.symbol == "BIGNEW/USDT" for c in found)
+
+
+class TestDepthRendering:
+    def test_usd_quoted_pairs_use_dollars(self):
+        from cadb.bot.commands import _depth
+
+        assert _depth(383_600, "BTC/USDT") == "$383.6K"
+
+    def test_btc_quoted_pairs_use_btc(self):
+        """Regression: SUI/BTC showed "bid $1" — that was 1 BTC, mislabelled."""
+        from cadb.bot.commands import _depth
+
+        assert "BTC" in _depth(1.0, "SUI/BTC")
+        assert "$" not in _depth(1.0, "SUI/BTC")
+
+    def test_eth_quoted_pairs_use_eth(self):
+        from cadb.bot.commands import _depth
+
+        assert "ETH" in _depth(1543.5, "X/ETH")

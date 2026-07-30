@@ -29,6 +29,23 @@ def _esc(text: str) -> str:
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _depth(value: float, pair: str) -> str:
+    """Render book depth in the pair's own quote currency.
+
+    Depth is computed as price x size, so for BTC-quoted pairs the unit is BTC,
+    not dollars. Printing "$1" for a SUI/BTC book was not a thin book — it was
+    1 BTC, mislabelled.
+    """
+    quote = pair.split("/")[-1].upper() if "/" in pair else "USDT"
+    if quote in ("USDT", "USDC", "USD", "BUSD", "FDUSD", "DAI", "TUSD"):
+        return _usd(value)
+    if value >= 1000:
+        return f"{value:,.0f} {quote}"
+    if value >= 1:
+        return f"{value:,.2f} {quote}"
+    return f"{value:.4g} {quote}"
+
+
 def _usd(value: float) -> str:
     """Compact USD rendering that never collapses a real amount to ``$0``.
 
@@ -415,7 +432,8 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
                     f"  price <code>{r.price:,.8g}</code>  "
                     f"spread <code>{r.spread_bps:.2f}bps</code>",
                     f"  OBI <code>{r.obi:+.3f}</code> ({side})",
-                    f"  depth  bid {_usd(r.bid_depth)} / ask {_usd(r.ask_depth)}",
+                    f"  depth  bid {_depth(r.bid_depth, query)} / "
+                    f"ask {_depth(r.ask_depth, query)}",
                     f"  24h <code>{r.change_pct:+.2f}%</code>  "
                     f"vol-z <code>{r.volume_z:+.2f}</code>",
                     "",

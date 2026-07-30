@@ -67,6 +67,9 @@ class SymbolDiscovery:
     track_new_listings: bool = True
     new_listing_grace_h: float = 48.0
     new_listing_min_volume_usd: float = 20_000.0
+    # A new listing must also show real movement or real liquidity. Without
+    # this, "first seen in the ticker feed" alone was enough to win a slot.
+    new_listing_min_change_pct: float = 10.0
 
     # symbol -> rolling median 24h volume, for surge detection
     _volume_history: dict[str, list[float]] = field(default_factory=dict, repr=False)
@@ -103,10 +106,16 @@ class SymbolDiscovery:
         for symbol, data in tickers.items():
             if not symbol.endswith(f"/{self.quote}"):
                 continue
+            # Record the symbol as *known* before any filtering. Previously a
+            # pair with zero 24h volume was skipped before this line, so it
+            # never entered `_known_symbols` — and the moment it traded once it
+            # looked brand new. That is how dormant Binance altcoins (A2Z, ACA,
+            # ATA, DENT, FIO, HARD) ended up occupying the watchlist for 48h on
+            # a +0.4% move.
+            seen_now.add(symbol)
             volume = float(data.get("quoteVolume") or 0.0)
             if volume <= 0:
                 continue
-            seen_now.add(symbol)
 
             change = data.get("percentage")
             change = float(change) if change is not None else 0.0
@@ -169,18 +178,27 @@ class SymbolDiscovery:
                 and not is_new
                 and age_h is not None
                 and age_h <= self.new_listing_grace_h
+                and (
+                    abs(change) >= self.new_listing_min_change_pct
+                    or volume >= self.min_volume_usd
+                )
             ):
                 score += 25
                 reasons.append(f"new listing ({age_h:.1f}h old)")
 
             if is_new:
-                # Newly listed pairs are the highest-risk category by far: no
-                # price history, tiny float, and the usual venue for a rug. This
-                # weight deliberately exceeds the maximum any single price or
-                # volume criterion can contribute, so a new listing always
-                # surfaces even when established pairs are moving harder.
-                score += 60
-                reasons.append("newly listed")
+                # Newly listed pairs are the highest-risk category — no price
+                # history, tiny float, the usual venue for a rug — but "new"
+                # alone is not an anomaly. A first appearance in the ticker feed
+                # can also mean a dormant pair simply traded again, so require
+                # genuine activity before spending a WebSocket slot on it.
+                active = (
+                    abs(change) >= self.new_listing_min_change_pct
+                    or volume >= self.min_volume_usd
+                )
+                if active:
+                    score += 60
+                    reasons.append("newly listed")
 
             if reasons:
                 candidates.append(
