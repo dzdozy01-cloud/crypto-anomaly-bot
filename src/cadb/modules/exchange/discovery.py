@@ -63,7 +63,13 @@ class SymbolDiscovery:
     min_change_pct: float = 15.0
     volume_surge_ratio: float = 3.0
     always_include: tuple[str, ...] = ()
-    quote: str = "USDT"
+    # Quote currencies to scan, in preference order. A single hardcoded "USDT"
+    # made Coinbase and Kraken almost invisible: they are USD/USDC venues, so
+    # scanning only USDT covered 3% and 6% of their markets respectively —
+    # 1,557 pairs unseen across the two. Fiat quotes (EUR/GBP) are excluded
+    # deliberately: they duplicate the same asset at an FX offset.
+    quotes: tuple[str, ...] = ("USDT", "USDC", "USD", "FDUSD", "USD1")
+    quote: str = "USDT"  # retained for the on-demand resolver's default
     track_new_listings: bool = True
     new_listing_grace_h: float = 48.0
     new_listing_min_volume_usd: float = 20_000.0
@@ -104,7 +110,8 @@ class SymbolDiscovery:
         seen_now: set[str] = set()
 
         for symbol, data in tickers.items():
-            if not symbol.endswith(f"/{self.quote}"):
+            quote_ccy = symbol.split("/")[-1] if "/" in symbol else ""
+            if quote_ccy not in self.quotes:
                 continue
             # Record the symbol as *known* before any filtering. Previously a
             # pair with zero 24h volume was skipped before this line, so it
@@ -216,7 +223,19 @@ class SymbolDiscovery:
         self._first_scan = False
 
         candidates.sort(key=lambda c: -c.score)
-        selected = candidates[: self.max_symbols]
+
+        # One slot per base asset. BTC/USDT and BTC/USDC are the same market for
+        # surveillance purposes, and letting both through would halve the
+        # effective breadth of the watchlist. Keep whichever has more volume;
+        # ties break on the `quotes` preference order.
+        best_per_base: dict[str, DiscoveredSymbol] = {}
+        for cand in candidates:
+            base = cand.symbol.split("/")[0]
+            incumbent = best_per_base.get(base)
+            if incumbent is None or cand.quote_volume_usd > incumbent.quote_volume_usd:
+                best_per_base[base] = cand
+        deduped = sorted(best_per_base.values(), key=lambda c: -c.score)
+        selected = deduped[: self.max_symbols]
 
         # Pinned symbols are always watched, even when quiet — they are the
         # reference series the operator explicitly asked for.

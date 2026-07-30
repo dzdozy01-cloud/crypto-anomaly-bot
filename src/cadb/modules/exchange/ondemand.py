@@ -89,11 +89,13 @@ class OnDemandScanner:
         self,
         venues: list[str],
         quote: str = "USDT",
+        quotes: tuple[str, ...] = ("USDT", "USDC", "USD", "FDUSD", "USD1"),
         cache_ttl_s: float = 20.0,
         timeout_s: float = 12.0,
     ) -> None:
         self.venues = venues
         self.quote = quote
+        self.quotes = quotes
         self.cache_ttl_s = cache_ttl_s
         self.timeout_s = timeout_s
         self._clients: dict[str, Any] = {}
@@ -142,12 +144,20 @@ class OnDemandScanner:
         rather than an arbitrary single venue.
         """
         q = query.strip().upper()
-        symbol = q if "/" in q else f"{q}/{self.quote}"
         found: list[tuple[str, str]] = []
         for venue in self.venues:
             symbols = await self.markets(venue)
-            if symbol in symbols:
-                found.append((venue, symbol))
+            if "/" in q:
+                if q in symbols:
+                    found.append((venue, q))
+                continue
+            # Bare ticker: try each stable quote in preference order, so a
+            # USD-only venue like Coinbase still resolves `/check BTC`.
+            for quote in self.quotes:
+                candidate = f"{q}/{quote}"
+                if candidate in symbols:
+                    found.append((venue, candidate))
+                    break
         return found
 
     async def search(self, fragment: str, limit: int = 12) -> list[str]:
@@ -156,7 +166,7 @@ class OnDemandScanner:
         hits: set[str] = set()
         for venue in self.venues:
             for sym in await self.markets(venue):
-                if sym.endswith(f"/{self.quote}") and frag in sym.split("/")[0]:
+                if sym.split("/")[-1] in self.quotes and frag in sym.split("/")[0]:
                     hits.add(sym)
                     if len(hits) >= limit * 3:
                         break

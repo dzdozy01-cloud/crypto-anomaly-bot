@@ -42,6 +42,9 @@ exchange:
   discovery_max_volume_usd: 50000000 # ignore majors (too deep to move)
   discovery_min_change_pct: 25      # |24h change| to qualify — MASSIVE moves only
   discovery_volume_surge: 3.0       # x median volume to qualify
+  # Coinbase/Kraken quote in USD and USDC, not USDT — scanning only USDT made
+  # them nearly invisible. One slot per base asset regardless of quote.
+  discovery_quotes: [USDT, USDC, USD, FDUSD, USD1]
 
   # Newly listed tokens are watched unconditionally for a grace period —
   # the abnormal move usually happens shortly after listing.

@@ -952,3 +952,81 @@ class TestDepthRendering:
         from cadb.bot.commands import _depth
 
         assert "ETH" in _depth(1543.5, "X/ETH")
+
+
+class TestMultiQuoteScanning:
+    """Regression: USD/USDC venues were nearly invisible.
+
+    /watchlist reported "kraken: 49 pairs scanned, coinbase: 23" against venues
+    listing ~1,500 and ~940 markets. Discovery filtered on a single hardcoded
+    USDT quote, but Coinbase and Kraken price in USD and USDC — so coverage was
+    3% and 6% respectively, hiding 1,557 pairs across the two.
+    """
+
+    def _disco(self, **kw):
+        from cadb.modules.exchange.discovery import SymbolDiscovery
+
+        params = {
+            "venue": "test", "max_symbols": 20, "min_volume_usd": 100_000,
+            "max_volume_usd": 50_000_000, "min_change_pct": 25.0,
+        }
+        params.update(kw)
+        return SymbolDiscovery(**params)
+
+    def test_usd_quoted_pairs_are_scanned(self):
+        d = self._disco()
+        found = {c.symbol for c in d.evaluate({
+            "ESP/USD": {"quoteVolume": 5e5, "percentage": 29.0},
+        })}
+        assert "ESP/USD" in found, "USD-quoted venues must not be skipped"
+
+    def test_usdc_quoted_pairs_are_scanned(self):
+        d = self._disco()
+        found = {c.symbol for c in d.evaluate({
+            "META/USDC": {"quoteVolume": 5e5, "percentage": -26.0},
+        })}
+        assert "META/USDC" in found
+
+    def test_fiat_quotes_excluded(self):
+        """EUR/GBP duplicate the same asset at an FX offset."""
+        d = self._disco()
+        found = {c.symbol for c in d.evaluate({
+            "BTC/EUR": {"quoteVolume": 5e5, "percentage": 30.0},
+            "BTC/GBP": {"quoteVolume": 5e5, "percentage": 30.0},
+        })}
+        assert not found
+
+    def test_one_slot_per_base_asset(self):
+        """BTC/USDT and BTC/USDC are the same market for surveillance."""
+        d = self._disco()
+        found = d.evaluate({
+            "WOW/USDT": {"quoteVolume": 9e5, "percentage": 40.0},
+            "WOW/USDC": {"quoteVolume": 3e5, "percentage": 40.0},
+            "WOW/USD": {"quoteVolume": 1e5, "percentage": 40.0},
+        })
+        assert len(found) == 1, f"duplicate quotes consumed slots: {[c.symbol for c in found]}"
+        assert found[0].symbol == "WOW/USDT", "should keep the deepest market"
+
+    def test_dedup_keeps_highest_volume(self):
+        d = self._disco()
+        found = d.evaluate({
+            "ZZZ/USDT": {"quoteVolume": 2e5, "percentage": 40.0},
+            "ZZZ/USDC": {"quoteVolume": 8e5, "percentage": 40.0},
+        })
+        assert len(found) == 1
+        assert found[0].symbol == "ZZZ/USDC"
+
+    def test_quotes_configurable(self):
+        d = self._disco(quotes=("USDT",))
+        found = {c.symbol for c in d.evaluate({
+            "A/USDT": {"quoteVolume": 5e5, "percentage": 40.0},
+            "B/USD": {"quoteVolume": 5e5, "percentage": 40.0},
+        })}
+        assert found == {"A/USDT"}
+
+    def test_config_default_includes_usd_and_usdc(self):
+        from cadb.core.config import Settings
+
+        quotes = Settings().exchange.discovery_quotes
+        assert "USD" in quotes and "USDC" in quotes and "USDT" in quotes
+        assert "EUR" not in quotes

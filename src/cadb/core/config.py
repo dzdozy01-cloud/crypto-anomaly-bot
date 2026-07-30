@@ -133,6 +133,12 @@ class ExchangeConfig(BaseModel):
     discovery_max_volume_usd: float = 50_000_000.0  # above this is not cheaply moved
     discovery_min_change_pct: float = 25.0        # |24h move| to qualify (massive only)
     discovery_volume_surge: float = 3.0           # x median volume to qualify
+    # Quote currencies to scan. Coinbase and Kraken are USD/USDC venues, so a
+    # USDT-only scan saw 3% and 6% of their markets. Fiat (EUR/GBP) is excluded:
+    # it duplicates the same asset at an FX offset.
+    discovery_quotes: list[str] = Field(
+        default_factory=lambda: ["USDT", "USDC", "USD", "FDUSD", "USD1"]
+    )
 
     # New-listing tracking. Freshly listed tokens are the highest-risk category:
     # no price history, tiny float, and the usual venue for a pump-and-dump.
