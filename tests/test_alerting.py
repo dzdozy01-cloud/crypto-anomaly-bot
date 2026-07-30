@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 import pytest_asyncio
 
 from cadb.alerting.formatter import format_discord, format_plain, format_telegram
@@ -295,9 +296,14 @@ class TestBotCommands:
             assert "usage" in out.lower() or "tracking" in out.lower()
 
     async def test_unknown_asset_is_handled(self, wired):
+        """An unlisted symbol must be reported as unlisted, not as "no data".
+
+        "No data" conflates "we are not watching this" with "this does not
+        exist", which is what made a quiet BTC look like a broken bot.
+        """
         _, bot = wired
         out = await bot.commands["check"](["NOSUCHTOKEN"], 1)
-        assert "no data" in out.lower()
+        assert "not listed" in out.lower() or "no data" in out.lower()
 
     async def test_threshold_updates_all_consumers(self, wired):
         app, bot = wired
@@ -579,3 +585,127 @@ class TestAllCommandsThroughDispatch:
         await bot._handle_update({"message": {"text": "/whoami", "chat": {"id": 42}}})
         assert "42" in sent[0]
         assert "different chat" in sent[0].lower()
+
+
+class TestCommandsAnswerForAnyToken:
+    """Regression: `/check BTC` returned "No data for BTC".
+
+    Removing pinned symbols fixed alert spam but broke every query command:
+    they read only the streaming feature store, so any token not currently
+    flagged as anomalous appeared unknown. A quiet symbol is not an unknown
+    symbol, and reporting "no data" for BTC reads as the bot being broken.
+    """
+
+    @pytest_asyncio.fixture
+    async def wired(self):
+        from cadb.app import Application
+        from cadb.bot.commands import register_commands
+        from cadb.bot.telegram_bot import TelegramBot
+        from cadb.core.config import Settings
+
+        s = Settings()
+        s.exchange.enabled = False
+        s.onchain.enabled = False
+        s.social.enabled = False
+        s.ml.model_path = ""
+        s.alerts.dry_run = True
+        s.telemetry.log_level = "ERROR"
+        s.telemetry.state_file = ""
+        app = Application(s)
+        await app.setup()
+        bot = TelegramBot(token="")
+        app.bot = bot
+        register_commands(bot, app)
+        yield app, bot
+
+    async def test_check_never_says_no_data_for_listed_token(self, wired):
+        """Stub the scanner so the test is deterministic and offline."""
+        from cadb.modules.exchange.ondemand import SymbolSnapshot
+
+        app, bot = wired
+
+        class FakeScanner:
+            async def best_snapshot(self, query):
+                snap = SymbolSnapshot(
+                    symbol="BTC/USDT", venue="mexc", price=64000.0,
+                    change_pct=-0.3, quote_volume=5.4e8, obi=-0.05,
+                    bid_depth=4e5, ask_depth=4.4e5, spread_bps=0.4,
+                    volume_z=0.3, volume_spike_ratio=1.1, candles=60,
+                )
+                return snap, ["mexc", "gate", "kucoin"]
+
+            async def search(self, frag, limit=8):
+                return []
+
+        app._ondemand = FakeScanner()
+        out = await bot.commands["check"](["BTC"], 1)
+        assert "No data for" not in out
+        assert "On-Demand Scan" in out
+        assert "64,000" in out or "64000" in out
+
+    async def test_unknown_symbol_says_not_listed_with_suggestions(self, wired):
+        app, bot = wired
+
+        class FakeScanner:
+            async def best_snapshot(self, query):
+                return None, []
+
+            async def search(self, frag, limit=8):
+                return ["PEPE/USDT", "PEPE2/USDT"]
+
+        app._ondemand = FakeScanner()
+        out = await bot.commands["check"](["PEP"], 1)
+        assert "not listed" in out.lower()
+        assert "PEPE/USDT" in out, "should suggest close matches"
+
+    async def test_social_explains_why_it_cannot_answer(self, wired):
+        """Social genuinely cannot be fetched on demand — say so clearly."""
+        from cadb.core.config import SocialConfig
+        from cadb.modules.social.monitor import SocialMonitor
+
+        app, bot = wired
+        app.social = SocialMonitor(app.bus, SocialConfig(x_bearer_token=""))
+        app.social.enabled_sources = False
+        out = await bot.commands["social"](["BTC"], 1)
+        assert "disabled" in out.lower()
+        assert "X_BEARER_TOKEN" in out
+        assert "not just this one" in out.lower(), "must not imply BTC is special"
+
+    async def test_movers_registered_and_handles_no_scanner(self, wired):
+        app, bot = wired
+        assert "movers" in bot.commands
+        app._ondemand = None
+        out = await bot.commands["movers"]([], 1)
+        assert isinstance(out, str) and out.strip()
+
+
+class TestOnDemandScanner:
+    def test_snapshot_maps_to_canonical_features(self):
+        from cadb.modules.exchange.ondemand import SymbolSnapshot
+        from cadb.modules.ml.features import FEATURE_NAMES
+
+        snap = SymbolSnapshot(
+            symbol="X/USDT", venue="mexc", price=1.0, change_pct=40.0,
+            quote_volume=1e6, obi=-0.8, bid_depth=1e5, ask_depth=9e5,
+            spread_bps=5.0, volume_z=4.2, volume_spike_ratio=8.0, candles=60,
+        )
+        fv = snap.to_feature_vector("X")
+        assert len(fv.values) == len(FEATURE_NAMES)
+        f = fv.as_dict()
+        assert f["obi"] == pytest.approx(-0.8)
+        assert f["obi_abs"] == pytest.approx(0.8)
+        assert f["volume_z"] == pytest.approx(4.2)
+
+    def test_coverage_is_honest_about_missing_modules(self):
+        from cadb.modules.exchange.ondemand import SymbolSnapshot
+
+        fv = SymbolSnapshot(symbol="X/USDT", venue="mexc", price=1.0).to_feature_vector("X")
+        assert fv.coverage == pytest.approx(1 / 3)
+        assert fv.sources_fresh["exchange"] is True
+        assert fv.sources_fresh["onchain"] is False
+        assert fv.sources_fresh["social"] is False
+
+    def test_failed_snapshot_reports_not_ok(self):
+        from cadb.modules.exchange.ondemand import SymbolSnapshot
+
+        assert not SymbolSnapshot(symbol="X/USDT", venue="mexc").ok

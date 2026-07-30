@@ -11,7 +11,7 @@ go stale, and a command always reflects what the classifier is seeing right now.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..alerting.formatter import SEVERITY_EMOJI, format_telegram
 from ..core.schema import now_ms
@@ -95,9 +95,56 @@ def _uptime(seconds: float) -> str:
     return f"{m}m"
 
 
+def _render_ondemand(signal: Any, snap: Any, venues: list[str]) -> str:
+    """Format an on-demand result, making its narrower basis explicit."""
+    emoji = SEVERITY_EMOJI.get(signal.severity.value, "⚪")
+    lines = [
+        f"{emoji} <b>{_esc(signal.asset_pair)} — On-Demand Scan</b>",
+        "",
+        f"<b>Score:</b> <code>{signal.score:.1f}/100</code>  {_bar(signal.score)}",
+        f"<b>Venue:</b> {snap.venue} <i>(deepest of {len(venues)} listing it)</i>",
+        "",
+        "<b>Market</b>",
+        f"  price      <code>{snap.price:,.8g}</code>",
+        f"  24h change <code>{snap.change_pct:+.2f}%</code>",
+        f"  24h volume <code>{_usd(snap.quote_volume)}</code>",
+        f"  OBI        <code>{snap.obi:+.3f}</code> "
+        f"({'bid' if snap.obi > 0.05 else 'ask' if snap.obi < -0.05 else 'balanced'}"
+        f"{'-heavy' if abs(snap.obi) > 0.05 else ''})",
+        f"  depth      bid {_usd(snap.bid_depth)} / ask {_usd(snap.ask_depth)}",
+        f"  spread     <code>{snap.spread_bps:.2f} bps</code>",
+        f"  volume z   <code>{snap.volume_z:+.2f}</code> "
+        f"<i>({snap.candles}x 1m candles)</i>",
+    ]
+    if signal.reasons:
+        lines += ["", "<b>Evidence</b>"]
+        lines += [f"  • {_esc(r)}" for r in signal.reasons[:5]]
+    lines += [
+        "",
+        "<i>🔍 Fetched on demand — order book and volume only. Live-streamed "
+        "pairs additionally carry CVD, cross-venue and on-chain context.</i>",
+    ]
+    return "\n".join(lines)
+
+
 # ------------------------------------------------------------------ registry
 def register_commands(bot: TelegramBot, app: Application) -> None:
     """Attach every command handler to ``bot``, bound to ``app`` state."""
+
+    def _scanner() -> Any:
+        """Lazily created REST scanner shared by the query commands."""
+        existing = getattr(app, "_ondemand", None)
+        if existing is not None:
+            return existing
+        try:
+            from ..modules.exchange.ondemand import OnDemandScanner
+
+            scanner = OnDemandScanner(venues=list(app.settings.exchange.exchanges))
+        except Exception:
+            return None
+        app._ondemand = scanner
+        return scanner
+
 
     # ---------------------------------------------------------- /help
     async def help_cmd(args: list[str], chat_id: int) -> str:
@@ -108,7 +155,8 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             "/scores — risk board, all assets ranked\n"
             "/check &lt;ASSET&gt; — full manipulation report\n"
             "/explain &lt;ASSET&gt; — feature-by-feature breakdown\n"
-            "/history [ASSET] — recent alerts fired\n\n"
+            "/history [ASSET] — recent alerts fired\n"
+            "/movers [n] — biggest movers across all venues\n\n"
             "<b>🔍 Per-module detail</b>\n"
             "/book &lt;PAIR&gt; — order book, OBI, CVD by venue\n"
             "/watchlist — pairs currently streamed\n"
@@ -213,16 +261,42 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
 
     # --------------------------------------------------------- /check
     async def check_cmd(args: list[str], chat_id: int) -> str:
+        """Score any listed symbol — streamed or fetched on demand."""
         if not args:
-            return "Usage: <code>/check BTC</code>"
+            return "Usage: <code>/check BTC</code> — works for any listed token"
         if not app.ml:
             return "⚠️ ML scorer not enabled."
-        asset = args[0].upper().split("/")[0]
+        query = args[0].upper()
+        asset = query.split("/")[0]
+
+        # Streaming data first: it is richer (live CVD, cross-venue) and free.
         signal = app.ml.score_asset(asset)
-        if signal is None:
-            known = ", ".join(sorted(app.ml.store.assets)[:12]) or "none yet"
-            return f"No data for <code>{_esc(asset)}</code>.\n\n<i>Tracking: {known}</i>"
-        return format_telegram(signal)["text"]
+        if signal is not None:
+            return format_telegram(signal)["text"] + "\n<i>📡 live stream</i>"
+
+        # Not currently streamed — fetch it. A symbol being quiet is not the
+        # same as a symbol being unknown, and answering "no data" for BTC
+        # because BTC is calm reads as the bot being broken.
+        scanner = _scanner()
+        if scanner is None:
+            return "⚠️ On-demand scanning unavailable (ccxt not installed)."
+        snap, venues = await scanner.best_snapshot(query)
+        if snap is None:
+            if venues:
+                return (
+                    f"<code>{_esc(query)}</code> is listed on {len(venues)} venue(s) "
+                    "but returned no data — the market may be halted."
+                )
+            similar = await scanner.search(asset, limit=8)
+            hint = (
+                "\n\nDid you mean: " + ", ".join(f"<code>{s}</code>" for s in similar)
+                if similar else ""
+            )
+            return f"<code>{_esc(query)}</code> is not listed on any configured venue.{hint}"
+
+        fv = snap.to_feature_vector(asset)
+        scored = app.ml.classifier.classify(fv, venue=snap.venue)
+        return _render_ondemand(scored, snap, venues)
 
     # ------------------------------------------------------- /explain
     async def explain_cmd(args: list[str], chat_id: int) -> str:
@@ -231,13 +305,28 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             return "Usage: <code>/explain PEPE</code>"
         if not app.ml:
             return "⚠️ ML scorer not enabled."
-        asset = args[0].upper().split("/")[0]
+        query = args[0].upper()
+        asset = query.split("/")[0]
         fv = app.ml.store.build(asset)
+        source = "📡 live stream"
         if fv is None:
-            return f"No data for <code>{_esc(asset)}</code>."
+            # Not streaming — reconstruct the vector from REST so the command
+            # answers for any listed token rather than only the watchlist.
+            scanner = _scanner()
+            snap = None
+            if scanner is not None:
+                snap, venues = await scanner.best_snapshot(query)
+            if snap is None:
+                similar = await scanner.search(asset, limit=6) if scanner else []
+                hint = ("\n\nDid you mean: "
+                        + ", ".join(f"<code>{x}</code>" for x in similar)) if similar else ""
+                return f"<code>{_esc(query)}</code> is not listed on any configured venue.{hint}"
+            fv = snap.to_feature_vector(asset)
+            source = f"🔍 on-demand via {snap.venue}"
 
         breakdown = app.ml.classifier.score(fv)
         emoji = SEVERITY_EMOJI[_severity_of(breakdown.composite)]
+        _ = source
         lines = [
             f"{emoji} <b>{_esc(asset)} — Score Breakdown</b>",
             "",
@@ -277,6 +366,7 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
         if breakdown.reasons:
             lines += ["", "<b>Evidence</b>"]
             lines += [f"  • {_esc(r)}" for r in breakdown.reasons[:7]]
+        lines += ["", f"<i>{source}</i>"]
         return "\n".join(lines)
 
     # ---------------------------------------------------------- /book
@@ -296,7 +386,42 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             query = f"{query}/USDT"
         matches = {v: st for (v, sym), st in app.exchange.states.items() if sym == query}
         if not matches:
-            return f"No order-book data for <code>{_esc(query)}</code>."
+            # Fetch the book directly rather than claiming we have none.
+            scanner = _scanner()
+            if scanner is None:
+                return f"No order-book data for <code>{_esc(query)}</code>."
+            pairs = await scanner.resolve(query)
+            if not pairs:
+                similar = await scanner.search(query.split("/")[0], limit=6)
+                hint = ("\n\nDid you mean: "
+                        + ", ".join(f"<code>{x}</code>" for x in similar)) if similar else ""
+                return f"<code>{_esc(query)}</code> is not listed on any configured venue.{hint}"
+            import asyncio as _aio
+
+            snaps = await _aio.gather(
+                *(scanner.snapshot(v, sym) for v, sym in pairs), return_exceptions=True
+            )
+            rows = [x for x in snaps if getattr(x, "ok", False)]
+            if not rows:
+                return f"<code>{_esc(query)}</code> returned no book data."
+            rows.sort(key=lambda r: -(r.bid_depth + r.ask_depth))
+            out = [f"<b>📖 {_esc(query)} — Order Book</b>", ""]
+            for r in rows[:6]:
+                warn = " ⚠️" if abs(r.obi) >= app.settings.exchange.obi_threshold else ""
+                side = ("bid-heavy" if r.obi > 0.05
+                        else "ask-heavy" if r.obi < -0.05 else "balanced")
+                out += [
+                    f"<b>{r.venue}</b>{warn}",
+                    f"  price <code>{r.price:,.8g}</code>  "
+                    f"spread <code>{r.spread_bps:.2f}bps</code>",
+                    f"  OBI <code>{r.obi:+.3f}</code> ({side})",
+                    f"  depth  bid {_usd(r.bid_depth)} / ask {_usd(r.ask_depth)}",
+                    f"  24h <code>{r.change_pct:+.2f}%</code>  "
+                    f"vol-z <code>{r.volume_z:+.2f}</code>",
+                    "",
+                ]
+            out.append("<i>🔍 fetched on demand — not currently streamed</i>")
+            return "\n".join(out)
 
         lines = [f"<b>📖 {_esc(query)} — Order Book</b>", ""]
         for venue, state in sorted(matches.items()):
@@ -412,10 +537,25 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
             tracked = ", ".join(sorted(app.social.states)) or "none yet"
             return f"Usage: <code>/social PEPE</code>\n\n<i>Tracking: {tracked}</i>"
 
-        ticker = args[0].upper()
+        ticker = args[0].upper().split("/")[0]
         state = app.social.states.get(ticker)
         if state is None:
-            return f"No social data for <code>{_esc(ticker)}</code>."
+            if not getattr(app.social, "enabled_sources", True):
+                return (
+                    "🔕 <b>Social module is disabled.</b>\n\n"
+                    "No X or Telegram credentials are configured, so sentiment "
+                    "and bot-farm detection are unavailable for every ticker — "
+                    "not just this one.\n\n"
+                    "Set <code>X_BEARER_TOKEN</code> (and/or "
+                    "<code>TELEGRAM_API_ID</code> + channels) to enable it."
+                )
+            tracked = ", ".join(sorted(app.social.states)) or "none yet"
+            return (
+                f"No social data for <code>{_esc(ticker)}</code>.\n\n"
+                f"<i>Social monitoring covers configured tickers only — it cannot "
+                f"be fetched on demand the way market data can.</i>\n"
+                f"<i>Currently tracking: {tracked}</i>"
+            )
 
         snap = state.snapshot()
         sentiment = snap["sentiment"]
@@ -600,6 +740,65 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
         bot.muted_until = 0.0
         return "🔔 Unmuted."
 
+    # -------------------------------------------------------- /movers
+    async def movers_cmd(args: list[str], chat_id: int) -> str:
+        """Rank the biggest movers across every venue, on demand.
+
+        Answers "what is happening right now" without depending on what the
+        streaming engine happens to be subscribed to.
+        """
+        scanner = _scanner()
+        if scanner is None:
+            return "⚠️ On-demand scanning unavailable (ccxt not installed)."
+
+        try:
+            limit = int(args[0]) if args else 15
+        except ValueError:
+            limit = 15
+        limit = max(1, min(limit, 30))
+
+        import asyncio as _aio
+
+        from ..modules.exchange.discovery import SymbolDiscovery
+
+        async def scan(venue: str):
+            try:
+                client = scanner._client(venue)
+                tickers = await _aio.wait_for(client.fetch_tickers(), timeout=20)
+            except Exception:
+                return []
+            disco = SymbolDiscovery(
+                venue=venue,
+                max_symbols=limit,
+                min_volume_usd=app.settings.exchange.discovery_min_volume_usd,
+                max_volume_usd=app.settings.exchange.discovery_max_volume_usd,
+                min_change_pct=app.settings.exchange.discovery_min_change_pct,
+            )
+            return disco.evaluate(tickers)
+
+        results = await _aio.gather(
+            *(scan(v) for v in app.settings.exchange.exchanges), return_exceptions=True
+        )
+        found = [c for r in results if isinstance(r, list) for c in r]
+        if not found:
+            thr = app.settings.exchange.discovery_min_change_pct
+            return (
+                f"🟢 <b>No significant movers</b>\n\n"
+                f"<i>Nothing across {len(app.settings.exchange.exchanges)} venues "
+                f"exceeds ±{thr:.0f}% with adequate liquidity.</i>"
+            )
+
+        found.sort(key=lambda c: -abs(c.change_pct))
+        lines = ["<b>🔥 Biggest Movers</b>  <i>(all venues)</i>", ""]
+        for c in found[:limit]:
+            arrow = "🟢" if c.change_pct > 0 else "🔴"
+            lines.append(
+                f"{arrow} <code>{c.symbol.split('/')[0]:<10}{c.change_pct:+8.1f}%</code> "
+                f"{_usd(c.quote_volume_usd):>9}  <i>{c.venue}</i>"
+            )
+        lines += ["", f"<i>{len(found)} movers found · /check &lt;SYMBOL&gt; for detail</i>"]
+        return "\n".join(lines)
+
     # ----------------------------------------------------- /watchlist
     async def watchlist_cmd(args: list[str], chat_id: int) -> str:
         """Show which pairs are streamed, and which were auto-discovered."""
@@ -730,6 +929,7 @@ def register_commands(bot: TelegramBot, app: Application) -> None:
     bot.register("pause", pause_cmd, "Pause alert delivery")
     bot.register("resume", resume_cmd, "Resume alert delivery")
     bot.register("unmute", unmute_cmd, "Cancel an active mute")
+    bot.register("movers", movers_cmd, "Biggest movers across all venues")
     bot.register("watchlist", watchlist_cmd, "Pairs currently streamed")
     bot.register("whoami", whoami_cmd, "Show this chat id and alert routing")
     bot.register("test", test_cmd, "Send a test alert")

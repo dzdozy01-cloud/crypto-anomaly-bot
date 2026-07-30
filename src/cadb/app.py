@@ -54,6 +54,7 @@ class Application:
         self.started_at = 0.0
         self.alerts_paused = False
         self.alert_history: deque[AnomalySignal] = deque(maxlen=200)
+        self._ondemand: Any = None  # lazily created REST scanner (bot commands)
         self._shutdown = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
 
@@ -250,6 +251,13 @@ class Application:
         if self.bot:
             with contextlib.suppress(Exception):
                 await self.bot.stop()
+        # The on-demand scanner holds ccxt REST sessions created lazily by the
+        # bot commands; leaking them logs "Unclosed connector" on exit.
+        scanner = getattr(self, "_ondemand", None)
+        if scanner is not None:
+            with contextlib.suppress(Exception):
+                await scanner.close()
+            self._ondemand = None
         if self.router:
             with contextlib.suppress(Exception):
                 await self.router.close()
